@@ -8,6 +8,7 @@
 
 import argparse
 import re
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -40,8 +41,14 @@ def process_single_video(
     transcriber: FunASRTranscriber,
     keep_audio: bool,
     overwrite: bool,
+    cid: int | None = None,
 ) -> bool:
-    """处理单个视频，返回成功与否。"""
+    """处理单个视频，返回成功与否。
+
+    cid: 在批量模式时由 extract_series_videos 提供；为 None 时退化为
+    "重新拉 info 取 pages[0]"——这种行为对单视频/URL 是合理的，但批量时
+    需要传 cid 避免使用错误分集的 audio URL。
+    """
     if output.exists() and not overwrite:
         print(f"⏭️  跳过已存在: {output}")
         return False
@@ -68,8 +75,9 @@ def process_single_video(
                 return False
             print(f"📺 标题: {info['title']}")
 
-            page = info["pages"][0]
-            url = get_audio_url(info["aid"], page["cid"])
+            if cid is None:
+                cid = info["pages"][0]["cid"]
+            url = get_audio_url(info["aid"], cid)
             if not url:
                 print("❌ 获取音频链接失败")
                 return False
@@ -94,10 +102,16 @@ def process_single_video(
         # 3. 规范化
         segments = normalize_funasr_output(raw)
 
-        # 4. 输出
+        # 4. 输出文本
         output.parent.mkdir(parents=True, exist_ok=True)
         text = format_segments(segments)
         output.write_text(text, encoding="utf-8")
+
+        # 5. 可选：保留 wav 文件（移出临时目录）
+        if keep_audio:
+            kept_wav = output.parent / f"{output.stem}.wav"
+            shutil.copy2(wav_path, kept_wav)
+            print(f"💾 已保留音频: {kept_wav}")
 
     print(f"✅ 已写入 {output}（{len(segments)} 段）")
     return True
@@ -173,6 +187,7 @@ def main():
                 video["bvid"], out_file, transcriber,
                 args.keep_audio,
                 overwrite=not args.no_overwrite,
+                cid=video.get("cid"),
             )
     else:
         output = Path(args.output)
