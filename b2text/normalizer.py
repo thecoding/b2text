@@ -23,7 +23,8 @@ def normalize_funasr_output(raw: Iterable[dict]) -> list[Segment]:
 
     segments: list[Segment] = []
     for item in raw:
-        text = (item.get("text") or "").strip()
+        # FunASR merged pipeline 用 "sentence"；narration pipeline 用 "text"
+        text = (item.get("sentence") or item.get("text") or "").strip()
         spk = item.get("spk")
         if not text or spk is None:
             continue

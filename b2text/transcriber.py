@@ -41,11 +41,12 @@ class FunASRTranscriber:
     def transcribe(self, wav_path: str | Path) -> list[dict[str, Any]]:
         """对 WAV 文件做 ASR + VAD + 说话人日志，返回原始 segment 列表。
 
-        每个 segment 形如: {"start": float, "end": float, "text": str, "spk": int}
+        每个 segment 形如: {"start": float, "end": float, "sentence"/"text": str, "spk": int}
         """
         self._load_model()
         result = self._model.generate(input=str(wav_path))
-        # FunASR 返回 [{"key": ..., "value": [...]}]，其中 value 是 segment 列表
         if not result:
             return []
-        return result[0].get("value", [])
+        # FunASR merged pipeline 返回 sentence_info（每个元素 {start, end, sentence, spk, ...}）。
+        # 旧版本或不同 pipeline 可能用 "value"，两个 key 都试一下。
+        return result[0].get("sentence_info") or result[0].get("value") or []  # type: ignore[return-value]  # noqa: E501

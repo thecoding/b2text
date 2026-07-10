@@ -32,3 +32,15 @@ def test_uses_utf8_encoding_compatible_strings():
     segs = [Segment(0.0, 1.0, "Speaker_1", "你好世界")]
     result = format_segments(segs)
     assert "你好世界" in result
+
+
+def test_strips_spaces_between_chinese_chars():
+    """FunASR merged pipeline 无 punc 时输出 '你 好 欢 迎'；要去掉字符间空格。"""
+    segs = [Segment(0.0, 1.0, "Speaker_1", "你 好 欢 迎")]
+    assert format_segments(segs) == "[00:00:00] Speaker_1: 你好欢迎"
+
+
+def test_preserves_leading_and_trailing_padding_only():
+    """首尾空格会被 strip。"""
+    segs = [Segment(0.0, 1.0, "Speaker_1", "  你好世界  ")]
+    assert format_segments(segs) == "[00:00:00] Speaker_1: 你好世界"

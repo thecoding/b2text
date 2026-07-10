@@ -17,6 +17,14 @@ def test_skips_segments_without_text():
     assert result[0].text == "你好"
 
 
+def test_accepts_sentence_key_from_funasr_pipeline():
+    """FunASR merged pipeline 用 'sentence' 而非 'text'。"""
+    raw = [{"start": 0.0, "end": 2.0, "sentence": "你好世界", "spk": 0}]
+    result = normalize_funasr_output(raw)
+    assert len(result) == 1
+    assert result[0].text == "你好世界"
+
+
 def test_skips_segments_without_speaker():
     raw = [
         {"start": 0.0, "end": 1.0, "text": "你好"},
