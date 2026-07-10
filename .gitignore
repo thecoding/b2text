@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# Audio / video files (downloaded content)
+downloads/
+*.mp4
+*.m4s
+*.wav
+*.mp3
+
+# Model cache
+.cache/
+modelscope_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Testing
+.coverage
+htmlcov/
