@@ -48,7 +48,7 @@ bilibili_to_text.py (CLI 入口)
       ├── audio.py        # BV→音频流 / mp4→WAV
       ├── transcriber.py  # FunASR ASR 封装
       ├── diarizer.py     # FunASR CAM++ 说话人日志
-      ├── aligner.py      # ASR + Diarization + VAD 三方对齐
+      ├── normalizer.py   # 把 FunASR AutoModel 输出规整为统一数据结构
       ├── formatter.py    # 输出文本格式化
       └── utils.py        # BV号提取、文件工具
 ```
@@ -67,11 +67,11 @@ bilibili_to_text.py (CLI 入口)
 [transcriber.py] ──→ 段列表[(start, end, text)]
   │
   ▼
-[diarizer.py] ──→ 段列表[(start, end, speaker_id)]
+[FunASR AutoModel: VAD + ASR + Diarization 一次调用]
   │
   ▼
-[aligner.py] ──→ 段列表[(start, end, speaker_id, text)]
-  │              (按时间戳 IoU 最大匹配)
+[normalizer.py] ──→ 段列表[(start, end, speaker_id, text)]
+  │                  (FunASR 已完成对齐，normalizer 仅做数据结构规整)
   ▼
 [formatter.py] ──→ 纯文本
   │
@@ -106,7 +106,7 @@ result = model.generate(input=wav_path)
 │   ├── audio.py
 │   ├── transcriber.py
 │   ├── diarizer.py
-│   ├── aligner.py
+│   ├── normalizer.py
 │   ├── formatter.py
 │   └── utils.py
 ├── tests/
@@ -132,8 +132,9 @@ python bilibili_to_text.py BV1xxxxxxxxxx -o output.txt
 # 用法2：处理本地 mp4
 python bilibili_to_text.py ./downloads/xxx/001.mp4 -o output.txt
 
-# 用法3：批量合集
+# 用法3：批量合集（每个视频独立输出到 -o 目录下）
 python bilibili_to_text.py BV1xxxxxxxxxx --batch -o ./texts/
+# 生成: ./texts/001_<标题>.txt, ./texts/002_<标题>.txt ...
 
 # 用法4：指定说话人数量（已知）
 python bilibili_to_text.py BV1xxxxxxxxxx --spk-num 2 -o output.txt
@@ -152,6 +153,8 @@ python bilibili_to_text.py BV1xxxxxxxxxx --spk-num 2 -o output.txt
 | `--keep-audio` | 保留中间音频文件 | False |
 
 ## 输出格式
+
+文件以 **UTF-8 无 BOM** 编码，行尾 `\n`（Unix 风格）。
 
 ```
 [00:00:15] Speaker_1: 大家好欢迎来到本期节目
