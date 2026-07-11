@@ -67,3 +67,45 @@ def ensure_wav(source: Path, output_dir: Path) -> Path:
         return source
     wav_path = output_dir / (source.stem + ".wav")
     return extract_audio_from_mp4(source, wav_path)
+
+
+def get_wav_duration_seconds(wav_path: Path) -> float:
+    """用 ffprobe 读 WAV 时长（秒）。失败抛 RuntimeError。"""
+    result = subprocess.run(
+        [
+            "ffprobe", "-v", "quiet",
+            "-show_entries", "format=duration",
+            "-of", "csv=p=0",
+            str(wav_path),
+        ],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        raise RuntimeError(f"ffprobe 失败: {result.stderr[:200]}")
+    return float(result.stdout.strip())
+
+
+def chunk_wav(wav_path: Path, output_dir: Path, chunk_seconds: int) -> list[tuple[Path, float]]:
+    """把 WAV 切成等长片段，返回 [(path, offset_seconds), ...]。
+
+    使用 ffmpeg segment muxer，最后一段可能较短。失败抛 RuntimeError。
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    pattern = output_dir / f"{wav_path.stem}_chunk_%04d.wav"
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(wav_path),
+        "-f", "segment",
+        "-segment_time", str(chunk_seconds),
+        "-reset_timestamps", "0",
+        "-ar", "16000", "-ac", "1",
+        str(pattern),
+    ]
+    result = subprocess.run(cmd, capture_output=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg 切片失败 (exit {result.returncode}): "
+            f"{result.stderr.decode(errors='ignore')[:200]}"
+        )
+    chunks = sorted(output_dir.glob(f"{wav_path.stem}_chunk_*.wav"))
+    return [(p, i * chunk_seconds) for i, p in enumerate(chunks)]

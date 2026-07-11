@@ -3,9 +3,11 @@ from pathlib import Path
 import pytest
 from b2text.audio import (
     check_ffmpeg,
+    chunk_wav,
     extract_audio_from_mp4,
     download_audio_stream,
     ensure_wav,
+    get_wav_duration_seconds,
 )
 
 
@@ -91,3 +93,46 @@ class TestEnsureWav:
         wav = tmp_path / "test.wav"
         wav.touch()
         assert ensure_wav(source=wav, output_dir=tmp_path) == wav
+
+
+class TestGetWavDuration:
+    def test_parses_duration_from_ffprobe(self, monkeypatch, tmp_path):
+        def fake_run(cmd, **kwargs):
+            return subprocess.CompletedProcess(cmd, 0, b"2694.373875\n", b"")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        assert get_wav_duration_seconds(tmp_path / "fake.wav") == 2694.373875
+
+    def test_raises_on_ffprobe_failure(self, monkeypatch, tmp_path):
+        def fake_run(cmd, **kwargs):
+            return subprocess.CompletedProcess(cmd, 1, b"", b"err")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(RuntimeError, match="ffprobe"):
+            get_wav_duration_seconds(tmp_path / "fake.wav")
+
+
+class TestChunkWav:
+    def test_returns_chunks_with_offsets(self, monkeypatch, tmp_path):
+        def fake_run(cmd, **kwargs):
+            # 创建模拟的 chunk 文件
+            for i in range(3):
+                (tmp_path / f"input_chunk_{i:04d}.wav").touch()
+            return subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        wav = tmp_path / "input.wav"
+        wav.touch()
+        chunks = chunk_wav(wav, tmp_path, chunk_seconds=300)
+
+        assert len(chunks) == 3
+        assert [c[1] for c in chunks] == [0.0, 300.0, 600.0]
+
+    def test_raises_on_ffmpeg_failure(self, monkeypatch, tmp_path):
+        def fake_run(cmd, **kwargs):
+            return subprocess.CompletedProcess(cmd, 1, b"", b"err")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(RuntimeError, match="ffmpeg"):
+            chunk_wav(tmp_path / "x.wav", tmp_path, chunk_seconds=300)
