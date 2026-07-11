@@ -63,3 +63,19 @@ def test_output_is_sorted_by_start_time():
     result = normalize_funasr_output(raw)
     assert result[0].text == "先"
     assert result[1].text == "后"
+
+
+def test_millisecond_timestamps_are_converted_to_seconds():
+    """FunASR merged pipeline 返回毫秒（start=750, end=59970），要转为秒。"""
+    raw = [{"start": 750, "end": 59970, "sentence": "你好", "spk": 0}]
+    result = normalize_funasr_output(raw)
+    assert result[0].start == 0.75
+    assert result[0].end == 59.97
+
+
+def test_second_unit_timestamps_pass_through_unchanged():
+    """<= 10000 的值按秒处理（兼容其他 pipeline 模式）。"""
+    raw = [{"start": 0.75, "end": 59.97, "text": "你好", "spk": 0}]
+    result = normalize_funasr_output(raw)
+    assert result[0].start == 0.75
+    assert result[0].end == 59.97
