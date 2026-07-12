@@ -136,11 +136,14 @@ sudo apt install ffmpeg   # Linux
 
 **`获取视频信息失败` / `code: -101` / `code: -352`**
 
-B 站的 cookie 会过期。打开 `b2text/bili_api.py`，把 `COOKIE` 替换成新的 SESSDATA：
+仓库内置的 `COOKIE` 是占位符（`YOUR_BILIBILI_COOKIE_HERE`），需要替换成你自己的：
 
 1. 浏览器登录 bilibili.com，F12 → Network → 任意请求 → 复制 `Cookie` 头
 2. 重点保留 `SESSDATA=...; bili_jct=...` 两段
-3. 粘贴到 `COOKIE = "..."`，保持 `buvid4` 在前
+3. 同时改两个文件（cookie 在两处都需要）：
+   - `b2text/bili_api.py`（用于调 B 站 API 取元数据）
+   - `b2text/audio.py`（用于 curl 下载 m4s 音频流）
+4. 把两处的 `COOKIE = "YOUR_BILIBILI_COOKIE_HERE"` 替换成真实 cookie
 
 更彻底的方案是实现 cookie 自动刷新（见 `bilibili_batch_downloader.py`）。
 

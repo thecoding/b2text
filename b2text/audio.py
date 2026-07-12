@@ -5,11 +5,8 @@
 import subprocess
 from pathlib import Path
 
-COOKIE = (
-    "buvid4=D21E6012-4A38-B23C-2BC5-7961BE48BEDE62503-024092215-3n5xeHPj8bn9aScYIf2pzg%3D%3D; "
-    "SESSDATA=02e002c7%2C1778164764%2C4ad7b%2Ab1CjAFHRTtmUbXSwancqb8IOrEITiLH-OCPDF8YgnZZoJyUC4S2hy63a6JiY0UlRuu-lMSVnlzWVBxRUFOOUx3bmZQZEF1RnlnRGxhNlprLXZLejQwTmtvMWdjNm9mTldXd3M0ZHVCWGJVdzVmb2FuOGpkalc5WHhycnJQdDlKMFNzZ0U2TkZkN19RIIEC; "
-    "bili_jct=169d89ed657d4564dd1e190a04ec1acd"
-)
+# 占位符：请替换为你的真实 cookie。详见 README 故障排查。
+COOKIE = "YOUR_BILIBILI_COOKIE_HERE"
 
 
 def check_ffmpeg() -> bool:
