@@ -91,10 +91,13 @@ def _serve_stop(args) -> int:
         return 0
     for _ in range(20):
         time.sleep(0.5)
-        if not pid_path.exists():
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            pid_path.unlink(missing_ok=True)
             print(f"✅ daemon 已停止（pid {pid}）")
             return 0
-    print(f"⚠️  30s 内未退出，尝试 SIGKILL")
+    print(f"⚠️  10s 内未退出，尝试 SIGKILL")
     try:
         os.kill(pid, signal.SIGKILL)
     except ProcessLookupError:
