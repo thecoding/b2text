@@ -3,3 +3,6 @@ modelscope>=1.10.0
 torch>=2.0.0
 numpy
 pytest>=7.0
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+httpx>=0.26.0
