@@ -121,6 +121,8 @@ M1 Pro 32 GB 实测：~17s 音频 → ~1s 转写（rtf ≈ 0.05）。CPU 上 rtf
 
 ## 测试
 
+Daemon 模式依赖 `fastapi`/`uvicorn`/`httpx`（已在 requirements.txt 中）。
+
 ```bash
 pytest -v                          # 全部测试（集成测试需 FunASR + 模型）
 pytest -m "not integration" -v     # 仅单元测试（无需模型）
@@ -175,6 +177,67 @@ rm -rf ~/.cache/modelscope/   # 强制下次运行时重新下载
 ## 与现有下载器的关系
 
 本项目与 `bilibili_batch_downloader.py` 完全独立。下载器只下载视频；本工具只转文本。如需完整流程：先用下载器，再用本工具处理 mp4。
+
+## Daemon 模式（v2）
+
+把模型常驻内存，多次提交不用重新加载 FunASR。任务经由本地 HTTP daemon（`127.0.0.1:8765`）排队，SQLite 持久化，重启自动恢复未完成任务。
+
+### 准备 cookie
+
+```bash
+mkdir -p ~/.config/b2text
+echo "SESSDATA=xxx; bili_jct=xxx" > ~/.config/b2text/cookie
+chmod 600 ~/.config/b2text/cookie
+```
+
+也可用环境变量一次性覆盖：`export B2TEXT_COOKIE="..."`。文件优先于环境变量。
+
+### 启动
+
+```bash
+b2text serve start
+# 等几十秒模型加载完成
+b2text serve status   # 看 model_loaded=true 后再提交任务
+```
+
+### 提交任务
+
+```bash
+# 单个 BV
+b2text transcribe BV1xxxxxxxxx -o /Users/me/sourceRead/
+
+# 整个 UP 主（默认最新 50 条，可用 --limit 限制）
+b2text transcribe --type up 12345678 -o /Users/me/sourceRead/ --limit 30
+
+# 查状态
+b2text status <task_id>
+b2text list
+b2text list --status running
+
+# 取消排队中的任务
+b2text cancel <task_id>
+```
+
+### 看日志
+
+```bash
+b2text serve logs                       # tail daemon.log
+cat ~/.local/share/b2text/jobs.log      # 结构化 JSON Lines（每任务每步一行）
+```
+
+### 关闭
+
+```bash
+b2text serve stop
+```
+
+### 调试逃生口（不走 daemon）
+
+```bash
+b2text run BV1xxxxxxxxx -o /tmp/x.txt
+```
+
+直接本地同步跑，模型每次重新加载。
 
 ## 设计文档
 
