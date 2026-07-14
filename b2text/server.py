@@ -61,7 +61,8 @@ def _read_log_lines(log_path: Path, job_id: str) -> list[dict[str, Any]]:
             if isinstance(rec, dict) and rec.get("job_id") == job_id:
                 entries.append(rec)
             elif isinstance(rec, dict) and "raw" in rec:
-                # Unparseable lines: include only if they mention the job_id.
+                # Unparseable line: fall back to substring matching on the raw
+                # text because there is no parsed `job_id` field to filter by.
                 if job_id in raw:
                     entries.append(rec)
     return entries
@@ -73,50 +74,30 @@ def build_app(ctx: AppContext) -> FastAPI:
     The JobQueue wraps a SQLite connection that is bound to the thread that
     created it (sqlite3 default). FastAPI runs sync endpoint bodies in a
     threadpool, so we cannot share a single connection across requests.
-    Instead we open a fresh JobQueue per request via Depends — the connection
-    is then bound to that handler's thread.
+    Instead we open a fresh JobQueue per request via the get_queue dependency
+    below — the connection is bound to that handler's thread and closed
+    automatically when the request scope ends.
     """
-    def get_queue() -> Any:
-        # Yield-style: caller responsible for closing. Use a context-manager
-        # pattern via try/finally inside endpoints. We return the queue and
-        # register a close callback in the request scope.
-        return JobQueue(ctx.db_path)
+    def get_queue():
+        """FastAPI dependency: yield a JobQueue and close it when the request ends."""
+        q = JobQueue(ctx.db_path)
+        try:
+            yield q
+        finally:
+            q.close()
 
-    state: dict[str, Any] = {"ctx": ctx, "worker": None, "model_loaded": False,
-                             "shared_queue": None}
+    state: dict[str, Any] = {
+        "ctx": ctx,
+        "worker": None,
+        "model_loaded": False,
+        "model_error": None,
+    }
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        # Create a "shared" queue for lifespan-only operations (orphan recovery,
-        # worker). Use a dedicated thread so the connection is bound there.
+        # A separate queue owned by this lifespan coroutine for orphan recovery
+        # and the background worker. Per-request queues come from get_queue().
         shared_queue = JobQueue(ctx.db_path)
-        state["shared_queue"] = shared_queue
-        state["shared_queue_loop"] = asyncio.get_running_loop()
-
-        def _shared_call(fn, *args, **kwargs):
-            """Run a queue call from the shared-queue's thread.
-
-            FastAPI sync handlers run in a threadpool; sqlite connections are
-            thread-bound. We dispatch calls on the asyncio loop's thread via
-            run_in_executor using the shared queue's owning thread.
-            """
-            import threading
-            holder: dict[str, Any] = {}
-
-            def runner():
-                try:
-                    holder["result"] = fn(*args, **kwargs)
-                except BaseException as e:
-                    holder["error"] = e
-
-            t = threading.Thread(target=runner, daemon=True)
-            t.start()
-            t.join()
-            if "error" in holder:
-                raise holder["error"]
-            return holder.get("result")
-
-        state["shared_call"] = _shared_call
 
         # Recover orphans synchronously in this (lifespan) thread.
         recovered = shared_queue.recover_orphans()
@@ -131,8 +112,14 @@ def build_app(ctx: AppContext) -> FastAPI:
                                         queue=shared_queue)
 
             async def _load_model_then_mark_ready():
-                await asyncio.get_running_loop().run_in_executor(None,
-                                                                transcriber._load_model)
+                try:
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, transcriber._load_model
+                    )
+                except Exception as exc:
+                    print(f"[server] model load failed: {exc!r}", flush=True)
+                    state["model_error"] = str(exc)
+                    return
                 state["model_loaded"] = True
 
             asyncio.create_task(_load_model_then_mark_ready())
@@ -151,31 +138,22 @@ def build_app(ctx: AppContext) -> FastAPI:
     app = FastAPI(title="b2text daemon", lifespan=lifespan)
     app.state.ctx = ctx
 
-    def _close_queue(q: JobQueue) -> None:
-        try:
-            q.close()
-        except Exception:
-            pass
-
     @app.get("/health")
-    def health():
-        # Use a fresh per-request queue (bound to this thread).
-        q = get_queue()
-        try:
-            model_loaded = state.get("model_loaded", False) if ctx.run_real_pipeline else True
-            body = {
-                "ok": model_loaded,
-                "model_loaded": model_loaded,
-                "queue_len": len(q.list(status=JobStatus.QUEUED)),
-                "running": len(q.list(status=JobStatus.RUNNING)),
-            }
-            code = 200 if model_loaded else 503
-            return JSONResponse(body, status_code=code)
-        finally:
-            _close_queue(q)
+    def health(queue: JobQueue = Depends(get_queue)):
+        model_loaded = state.get("model_loaded", False) if ctx.run_real_pipeline else True
+        body: dict[str, Any] = {
+            "ok": model_loaded,
+            "model_loaded": model_loaded,
+            "queue_len": len(queue.list(status=JobStatus.QUEUED)),
+            "running": len(queue.list(status=JobStatus.RUNNING)),
+        }
+        if state.get("model_error"):
+            body["model_error"] = state["model_error"]
+        code = 200 if model_loaded else 503
+        return JSONResponse(body, status_code=code)
 
     @app.post("/transcribe")
-    def submit(req: TranscribeRequest):
+    def submit(req: TranscribeRequest, queue: JobQueue = Depends(get_queue)):
         if req.type == "bv" and not _validate_bvid(req.id):
             raise HTTPException(400, detail="invalid bv id format")
         if req.type == "up":
@@ -187,63 +165,44 @@ def build_app(ctx: AppContext) -> FastAPI:
                 raise HTTPException(400, detail="up id out of range")
         if ctx.run_real_pipeline and not state.get("model_loaded", False):
             raise HTTPException(503, detail={"error": "model_loading"})
-        q = get_queue()
-        try:
-            job_id = q.enqueue(
-                type=req.type,
-                target_id=req.id,
-                output_dir=req.output_dir,
-                limit_n=req.limit,
-            )
-            return {"task_id": job_id}
-        finally:
-            _close_queue(q)
+        job_id = queue.enqueue(
+            type=req.type,
+            target_id=req.id,
+            output_dir=req.output_dir,
+            limit_n=req.limit,
+        )
+        return {"task_id": job_id}
 
     @app.get("/tasks")
-    def list_tasks(status: str | None = Query(None), limit: int = 50, offset: int = 0):
+    def list_tasks(status: str | None = Query(None), limit: int = 50,
+                   offset: int = 0, queue: JobQueue = Depends(get_queue)):
         st = JobStatus(status) if status else None
-        q = get_queue()
-        try:
-            return {
-                "tasks": q.list(status=st, limit=limit, offset=offset),
-                "total": len(q.list(status=st)),
-            }
-        finally:
-            _close_queue(q)
+        return {
+            "tasks": queue.list(status=st, limit=limit, offset=offset),
+            "total": len(queue.list(status=st)),
+        }
 
     @app.get("/tasks/{task_id}")
-    def get_task(task_id: str):
-        q = get_queue()
-        try:
-            job = q.get(task_id)
-            if job is None:
-                raise HTTPException(404, detail="not found")
-            return job
-        finally:
-            _close_queue(q)
+    def get_task(task_id: str, queue: JobQueue = Depends(get_queue)):
+        job = queue.get(task_id)
+        if job is None:
+            raise HTTPException(404, detail="not found")
+        return job
 
     @app.get("/tasks/{task_id}/log")
-    def get_task_log(task_id: str):
-        q = get_queue()
-        try:
-            if q.get(task_id) is None:
-                raise HTTPException(404, detail="not found")
-            logs = _read_log_lines(ctx.log_path, task_id)
-            return {"logs": logs}
-        finally:
-            _close_queue(q)
+    def get_task_log(task_id: str, queue: JobQueue = Depends(get_queue)):
+        if queue.get(task_id) is None:
+            raise HTTPException(404, detail="not found")
+        logs = _read_log_lines(ctx.log_path, task_id)
+        return {"logs": logs}
 
     @app.delete("/tasks/{task_id}")
-    def cancel_task(task_id: str):
-        q = get_queue()
-        try:
-            if q.get(task_id) is None:
-                raise HTTPException(404, detail="not found")
-            if q.cancel(task_id):
-                return JSONResponse({"status": "cancelled"}, status_code=200)
-            raise HTTPException(409, detail="not cancellable in current status")
-        finally:
-            _close_queue(q)
+    def cancel_task(task_id: str, queue: JobQueue = Depends(get_queue)):
+        if queue.get(task_id) is None:
+            raise HTTPException(404, detail="not found")
+        if queue.cancel(task_id):
+            return JSONResponse({"status": "cancelled"}, status_code=200)
+        raise HTTPException(409, detail="not cancellable in current status")
 
     return app
 

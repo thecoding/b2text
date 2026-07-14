@@ -20,9 +20,9 @@ def app(tmp_path, monkeypatch):
     return TestClient(app)
 
 
-def test_health_returns_503_when_model_not_ready(app):
+def test_health_ok_when_pipeline_disabled(app):
     r = app.get("/health")
-    assert r.status_code in (200, 503)
+    assert r.status_code == 200
     body = r.json()
     assert "ok" in body
     assert "model_loaded" in body
@@ -73,7 +73,7 @@ def test_delete_task_only_cancels_queued(app):
     r = app.post("/transcribe", json={"type": "bv", "id": "BV1xxx", "output_dir": "/tmp/out"})
     task_id = r.json()["task_id"]
     r = app.delete(f"/tasks/{task_id}")
-    assert r.status_code in (200, 204)
+    assert r.status_code == 200
     assert "cancelled" in app.get(f"/tasks/{task_id}").json()["status"]
 
 
