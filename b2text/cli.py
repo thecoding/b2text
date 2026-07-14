@@ -25,7 +25,7 @@ from b2text.client import (
     submit_bv, submit_up, get_task, list_tasks, cancel_task,
 )
 from b2text.cookie_store import MissingCookieError, resolve_cookie
-from b2text.paths import config_dir, data_dir, daemon_pid, jobs_db, jobs_log
+from b2text.paths import config_dir, data_dir, daemon_pid
 
 
 _BASE_URL = DEFAULT_BASE_URL
@@ -122,7 +122,7 @@ def _serve_status(args) -> int:
         print(f"✅ daemon 正在运行（pid {pid}）")
         print(f"   ok={health.get('ok')}, model_loaded={health.get('model_loaded')}")
         print(f"   queue_len={health.get('queue_len')}, running={health.get('running')}")
-    except DaemonNotRunning:
+    except (DaemonNotRunning, httpx.HTTPError):
         print(f"⚠️  pidfile 存在（pid {pid}）但端口不响应")
     return 0
 
