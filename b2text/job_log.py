@@ -64,28 +64,6 @@ class JobLog:
         extra: dict[str, Any] | None = None,
     ) -> None:
         merged: dict[str, Any] = dict(extra or {})
-        msg = "fail"
-        if exc_info:
-            et, ev, tb = sys.exc_info()
-            if et is not None:
-                exc_msg = str(ev) if ev else ""
-                merged["exc_type"] = et.__name__
-                merged["exc_message"] = exc_msg
-                merged["stacktrace"] = "".join(
-                    traceback.format_exception(et, ev, tb)
-                )
-                msg = f"fail: {exc_msg}"
-        self.error(msg, step=step, extra=merged)
-
-    def _step_fail_plain(
-        self,
-        step: str,
-        *,
-        exc_info: bool = False,
-        extra: dict[str, Any] | None = None,
-    ) -> None:
-        """Context-manager 内部使用：msg 固定为 'fail'，不含异常文本。"""
-        merged: dict[str, Any] = dict(extra or {})
         if exc_info:
             et, ev, tb = sys.exc_info()
             if et is not None:
@@ -126,4 +104,4 @@ class StepLogger:
         if exc_type is None:
             self._log.step_ok(self._name, **self._extra)
         else:
-            self._log._step_fail_plain(self._name, exc_info=True, extra=self._extra)
+            self._log.step_fail(self._name, exc_info=True, extra=self._extra)

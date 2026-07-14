@@ -35,10 +35,9 @@ def test_step_fail_includes_stacktrace(log_path):
         j.step_fail("transcribe", exc_info=True, extra={"chunk_index": 0})
     lines = [json.loads(line) for line in log_path.read_text().splitlines()]
     err = next(ln for ln in lines if ln["level"] == "ERROR")
-    assert "boom" in err["msg"]
+    assert "boom" in err["extra"]["exc_message"]
     assert err["extra"]["chunk_index"] == 0
     assert "ValueError" in err["extra"]["exc_type"]
-    assert "boom" in err["extra"]["exc_message"]
     assert "traceback" in err["extra"]["stacktrace"].lower()
 
 
