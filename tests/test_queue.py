@@ -98,3 +98,22 @@ def test_recover_orphans_resets_running_to_queued(q):
     recovered = q.recover_orphans()
     assert recovered == 1
     assert q.get(job_id)["status"] == JobStatus.QUEUED
+
+
+def test_increment_retry_count(q):
+    job_id = q.enqueue(type="bv", target_id="BV1xxx", output_dir="/tmp/out")
+    q.increment_retry(job_id)
+    q.increment_retry(job_id)
+    assert q.get(job_id)["retry_count"] == 2
+
+
+def test_requeue_resets_status_from_running(q):
+    """服务调用 get_video_info 多次失败后重置为 queued 由 worker 再 claim。"""
+    job_id = q.enqueue(type="bv", target_id="BV1xxx", output_dir="/tmp/out")
+    q.claim_next()
+    q.increment_retry(job_id)
+    q.requeue(job_id)
+    job = q.get(job_id)
+    assert job["status"] == JobStatus.QUEUED
+    assert job["started_at"] is None
+    assert job["retry_count"] == 1

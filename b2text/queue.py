@@ -170,6 +170,25 @@ class JobQueue:
         )
         return [r[0] for r in cur.fetchall()]
 
+    # ---------- 重试 ----------
+    def increment_retry(self, job_id: str) -> int:
+        """retry_count += 1，返回新值。"""
+        cur = self._conn.execute(
+            "UPDATE jobs SET retry_count = retry_count + 1 WHERE id=?",
+            (job_id,),
+        )
+        cur = self._conn.execute(
+            "SELECT retry_count FROM jobs WHERE id=?", (job_id,),
+        )
+        return cur.fetchone()[0]
+
+    def requeue(self, job_id: str) -> None:
+        """running → queued 清空 started_at，用于 B 站 API 失败重试。"""
+        self._conn.execute(
+            "UPDATE jobs SET status=?, started_at=NULL WHERE id=?",
+            (JobStatus.QUEUED.value, job_id),
+        )
+
     # ---------- 内部 ----------
     def _row_to_dict(self, row: sqlite3.Row | tuple) -> dict[str, Any]:
         cols = (
