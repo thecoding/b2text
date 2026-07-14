@@ -24,6 +24,18 @@ class JobLog:
         self.log_path = log_path
         self.job_id = job_id
         # 不创建父目录 — daemon 启动时统一建好
+        # 暂存 set() 的字段，在下一次 step_start() 时合并进 extra
+        self._pending: dict[str, Any] = {}
+
+    def set(self, **kwargs: Any) -> "JobLog":
+        """暂存字段，供下一次 step_start（或 step_ok/step_fail）合并到 extra。"""
+        self._pending.update(kwargs)
+        return self
+
+    def _drain_pending(self) -> dict[str, Any]:
+        merged = dict(self._pending)
+        self._pending.clear()
+        return merged
 
     def _emit(self, level: str, step: str, msg: str, extra: dict[str, Any] | None) -> None:
         ts = datetime.now(timezone.utc).strftime(_TS_FORMAT)[:-3] + "Z"
@@ -51,7 +63,9 @@ class JobLog:
         self._emit("ERROR", step, msg, extra)
 
     def step_start(self, step: str, **extra: Any) -> None:
-        self.info("start", step=step, extra=extra)
+        merged = self._drain_pending()
+        merged.update(extra)
+        self.info("start", step=step, extra=merged)
 
     def step_ok(self, step: str, **extra: Any) -> None:
         self.info("ok", step=step, extra=extra)
