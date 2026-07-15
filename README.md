@@ -138,14 +138,21 @@ sudo apt install ffmpeg   # Linux
 
 **`获取视频信息失败` / `code: -101` / `code: -352`**
 
-仓库内置的 `COOKIE` 是占位符（`YOUR_BILIBILI_COOKIE_HERE`），需要替换成你自己的：
+未读到有效 cookie。`b2text/cookie_store.py` 的解析顺序（文件优先）：
 
 1. 浏览器登录 bilibili.com，F12 → Network → 任意请求 → 复制 `Cookie` 头
 2. 重点保留 `SESSDATA=...; bili_jct=...` 两段
-3. 同时改两个文件（cookie 在两处都需要）：
-   - `b2text/bili_api.py`（用于调 B 站 API 取元数据）
-   - `b2text/audio.py`（用于 curl 下载 m4s 音频流）
-4. 把两处的 `COOKIE = "YOUR_BILIBILI_COOKIE_HERE"` 替换成真实 cookie
+3. 写入文件（**daemon / `b2text run` / worker 三处共用，无需修改源码**）：
+
+   ```bash
+   mkdir -p ~/.config/b2text
+   echo "SESSDATA=xxx; bili_jct=xxx" > ~/.config/b2text/cookie
+   chmod 600 ~/.config/b2text/cookie
+   ```
+
+   或临时用环境变量：`export B2TEXT_COOKIE="SESSDATA=xxx; bili_jct=xxx"`。
+
+`b2text/bili_api.py` 和 `b2text/audio.py` 已不再依赖模块级 `COOKIE` 常量，cookie 由调用方（worker / `cli._run`）通过 `cookie=` 关键字参数显式传入；不要再去改源码里的占位符。
 
 更彻底的方案是实现 cookie 自动刷新（见 `bilibili_batch_downloader.py`）。
 
@@ -191,6 +198,8 @@ chmod 600 ~/.config/b2text/cookie
 ```
 
 也可用环境变量一次性覆盖：`export B2TEXT_COOKIE="..."`。文件优先于环境变量。
+
+> 同一套 cookie 文件同时供 daemon worker 和 `b2text run` 本地直跑使用——任何时候都不要再去改 `b2text/bili_api.py` 或 `b2text/audio.py` 源码里的占位符（已废弃）。
 
 ### 启动
 
