@@ -19,7 +19,7 @@ brew install ffmpeg
 
 python3 -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
+pip install -e .[dev]   # 运行时依赖 + pytest；只想用 CLI 不写测试可省 [dev]
 ```
 
 **模型下载**：首次运行会自动从 ModelScope 下载 Paraformer-large + CAM++ + FSMN-VAD 模型（约 1.3 GB），缓存到 `~/.cache/modelscope/`。再次运行直接用本地缓存。
@@ -121,7 +121,7 @@ M1 Pro 32 GB 实测：~17s 音频 → ~1s 转写（rtf ≈ 0.05）。CPU 上 rtf
 
 ## 测试
 
-Daemon 模式依赖 `fastapi`/`uvicorn`/`httpx`（已在 requirements.txt 中）。
+Daemon 模式依赖 `fastapi`/`uvicorn`/`httpx`（已在 `pyproject.toml` 的运行时依赖中）。
 
 ```bash
 pytest -v                          # 全部测试（集成测试需 FunASR + 模型）
