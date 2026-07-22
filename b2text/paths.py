@@ -34,4 +34,4 @@ def jobs_log() -> Path:
 
 
 def daemon_pid() -> Path:
-    return config_dir() / "daemon.pid"
+    return data_dir() / "daemon.pid"
