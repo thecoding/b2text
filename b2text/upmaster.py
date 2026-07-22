@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import httpx
 
+from b2text.ratelimit import _BILI_BUCKET
+
 _SPACE_API = "https://api.bilibili.com/x/space/arc/search"
 
 
@@ -34,6 +36,7 @@ def fetch_up_videos(uid: int, limit: int, *, cookie: str) -> list[str]:
     """
     if limit < 1:
         return []
+    _BILI_BUCKET.acquire()
     ps = min(limit, 50)
     url = f"{_SPACE_API}?mid={uid}&ps={ps}&pn=1&order=pubdate"
     headers = {

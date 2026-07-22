@@ -2,10 +2,11 @@
 """B站 API 客户端（httpx，统一 cookie 参数传递）。"""
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import httpx
+
+from b2text.ratelimit import _BILI_BUCKET
 
 _USER_AGENT = "Mozilla/5.0"
 _API_TIMEOUT = 20.0
@@ -13,6 +14,7 @@ _API_TIMEOUT = 20.0
 
 def _api_get(url: str, *, cookie: str) -> dict[str, Any]:
     """API GET 请求，返回 dict。失败返回 {}。"""
+    _BILI_BUCKET.acquire()
     try:
         with httpx.Client(timeout=_API_TIMEOUT) as client:
             r = client.get(

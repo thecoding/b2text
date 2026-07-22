@@ -109,3 +109,15 @@ def test_passes_cookie_header(monkeypatch):
 
     fetch_up_videos(uid=99, limit=5, cookie="SESSDATA=my_cookie")
     assert "SESSDATA=my_cookie" in captured["headers"].get("Cookie", "")
+
+
+def test_acquires_bucket_token_before_request(monkeypatch):
+    """fanout 调用 B 站 API，必须经过共享 _BILI_BUCKET 限速。"""
+    from b2text import upmaster
+    calls = []
+    monkeypatch.setattr(upmaster._BILI_BUCKET, "acquire", lambda: calls.append(1))
+    _mock_httpx_get(monkeypatch, json_data={
+        "code": 0, "data": {"list": {"vlist": [{"bvid": "BV1a"}]}},
+    })
+    fetch_up_videos(uid=1, limit=10, cookie="SESSDATA=x")
+    assert len(calls) == 1

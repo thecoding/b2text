@@ -148,7 +148,10 @@ def build_default_steps(*, cookie: str, transcriber, queue: JobQueue | None = No
         log.set(uid=uid, limit=limit)
         if queue is None:
             raise RuntimeError("fanout 需要 queue（type=up 任务创建子任务）")
-        bvids = fetch_up_videos(uid, limit, cookie=cookie)
+        bvids = _with_api_retry(
+            log, job, "fanout",
+            lambda: fetch_up_videos(uid, limit, cookie=cookie),
+        )
         if not bvids:
             raise RuntimeError(f"upmaster 没拉到任何视频：uid={uid}")
         for bvid in bvids:
@@ -158,6 +161,8 @@ def build_default_steps(*, cookie: str, transcriber, queue: JobQueue | None = No
         log.set(child_count=len(bvids))
 
     def get_video_info(job, log):
+        if job["type"] != "bv":
+            return
         info = _with_api_retry(log, job, "get_video_info",
                                lambda: _bili_api.get_video_info(job["target_id"], cookie=cookie))
         if not info:
@@ -166,6 +171,8 @@ def build_default_steps(*, cookie: str, transcriber, queue: JobQueue | None = No
         log.set(aid=info["aid"], title=info["title"])
 
     def get_audio_url(job, log):
+        if job["type"] != "bv":
+            return
         info = job["_video_info"]
         cid = info["pages"][0]["cid"]
         url = _with_api_retry(log, job, "get_audio_url",
@@ -175,27 +182,37 @@ def build_default_steps(*, cookie: str, transcriber, queue: JobQueue | None = No
         job["_audio_url"] = url
 
     def download_audio(job, log):
+        if job["type"] != "bv":
+            return
         m4s = job["_tmpdir"] / "audio.m4s"
         _audio.download_audio_stream(job["_audio_url"], m4s, cookie=cookie)
         job["_audio_path"] = m4s
 
     def convert_wav(job, log):
+        if job["type"] != "bv":
+            return
         wav = job["_tmpdir"] / "audio.wav"
         _audio.extract_audio_from_mp4(job["_audio_path"], wav)
         job["_wav_path"] = wav
 
     def chunk_audio(job, log):
+        if job["type"] != "bv":
+            return
         # b2text.transcriber 已经内置 chunk 逻辑（>10 min 自动切）
         # 这里仅查 duration 以便日志，标 0 表示无需独立切分
         log.set(chunked=False)
 
     def transcribe(job, log):
+        if job["type"] != "bv":
+            return
         log.set(device="mps", chunk_index=0, chunk_count=1)
         raw = transcriber.transcribe(job["_wav_path"])
         job["_raw_segments"] = raw or []
         log.set(segment_count=len(job["_raw_segments"]))
 
     def normalize_write(job, log):
+        if job["type"] != "bv":
+            return
         segs = normalize_funasr_output(job["_raw_segments"])
         text = format_segments(segs)
         safe = re.sub(r'[<>:"/\\|?*]', "_", job["target_id"])[:80]

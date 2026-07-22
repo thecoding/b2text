@@ -136,3 +136,43 @@ def test_bili_api_succeeds_on_third_attempt(env, monkeypatch):
     job = q.get(job_id)
     assert job["status"] == JobStatus.DONE
     assert job["retry_count"] == 2
+
+
+def test_fanout_retries_on_upmaster_api_error(env, monkeypatch):
+    """fanout 失败 (B 站 code=-799) 应触发 _with_api_retry 重试。
+
+    不重试的话一次 -799 就杀死整个 up 任务，用户得手动重提交。
+    """
+    from b2text.worker import Worker
+    from b2text.upmaster import UpmasterAPIError
+
+    q, log_path = env
+    monkeypatch.setattr("b2text.worker.time.sleep", lambda _: None)
+
+    attempts = {"n": 0}
+
+    def flaky(uid, limit, *, cookie):
+        attempts["n"] += 1
+        if attempts["n"] < 2:
+            raise UpmasterAPIError(
+                code=-799, message="请求过于频繁，请稍后再试", uid=uid,
+            )
+        return ["BV1aaa", "BV1bbb"]
+
+    transcriber = MagicMock()
+    transcriber.transcribe.return_value = []
+    steps = build_default_steps(cookie="dummy", transcriber=transcriber, queue=q)
+
+    with patch("b2text.upmaster.fetch_up_videos", side_effect=flaky):
+        worker = Worker(queue=q, log_path=log_path, cookie="dummy", steps=steps)
+        job_id = q.enqueue(type="up", target_id="486325909",
+                           output_dir="/tmp/out", limit_n=2)
+        asyncio.run(worker.run_once())
+
+    job = q.get(job_id)
+    assert job["status"] == JobStatus.DONE
+    assert attempts["n"] == 2
+    assert job["retry_count"] == 1
+    # 子任务也已入队
+    children = q.list()
+    assert any(c.get("parent_id") == job_id for c in children)

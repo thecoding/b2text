@@ -79,3 +79,41 @@ class TestGetAudioUrl:
         }
         self._mock_httpx_get(monkeypatch, json_data=fake_data)
         assert get_audio_url(aid=1, cid=1, cookie="SESSDATA=test") is None
+
+
+class TestRateLimiting:
+    """Both get_video_info and get_audio_url must consult the shared B站 bucket."""
+
+    def _mock_httpx_get(self, monkeypatch):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "code": 0,
+            "data": {
+                "aid": 1, "title": "t", "owner": {"name": "u"},
+                "videos": 1, "pages": [{"cid": 1, "part": "p", "page": 1}],
+                "ugc_season": None,
+            },
+        }
+        mock_client = MagicMock()
+        mock_client.__enter__.return_value.get.return_value = mock_response
+        mock_client_class = MagicMock(return_value=mock_client)
+        monkeypatch.setattr("httpx.Client", mock_client_class)
+        return mock_client_class
+
+    def test_get_video_info_acquires_bucket_token(self, monkeypatch):
+        """`_api_get` 必须调用 `_BILI_BUCKET.acquire()`，否则 B 站会 429。"""
+        from b2text import bili_api
+        calls = []
+        monkeypatch.setattr(bili_api._BILI_BUCKET, "acquire", lambda: calls.append(1))
+        self._mock_httpx_get(monkeypatch)
+        get_video_info(bvid="BV1xxx", cookie="SESSDATA=test")
+        assert len(calls) == 1
+
+    def test_get_audio_url_acquires_bucket_token(self, monkeypatch):
+        from b2text import bili_api
+        calls = []
+        monkeypatch.setattr(bili_api._BILI_BUCKET, "acquire", lambda: calls.append(1))
+        self._mock_httpx_get(monkeypatch)
+        get_audio_url(aid=1, cid=1, cookie="SESSDATA=test")
+        assert len(calls) == 1
