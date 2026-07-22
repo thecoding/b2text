@@ -119,5 +119,112 @@ def test_acquires_bucket_token_before_request(monkeypatch):
     _mock_httpx_get(monkeypatch, json_data={
         "code": 0, "data": {"list": {"vlist": [{"bvid": "BV1a"}]}},
     })
-    fetch_up_videos(uid=1, limit=10, cookie="SESSDATA=x")
+    fetch_up_videos(uid=1, limit=1, cookie="SESSDATA=x")
+    # 拿够 limit 就停
     assert len(calls) == 1
+
+
+def test_paginates_when_limit_exceeds_page_size(monkeypatch):
+    """--limit > 50 时应翻页（pn=1,2,...）直到拿够 limit 条。"""
+    from b2text import upmaster
+    monkeypatch.setattr(upmaster._BILI_BUCKET, "acquire", lambda: None)
+
+    # 总共 130 条：前 50 / 中 50 / 后 30
+    all_bvids = (
+        [f"BV1p{i:02d}" for i in range(50)]
+        + [f"BV1q{i:02d}" for i in range(50)]
+        + [f"BV1r{i:02d}" for i in range(30)]
+    )
+    # cursor 模拟 B 站：每次请求返回 ps 条、按 cursor 推进。
+    cursor = {"i": 0}
+    captured_pn: list[int] = []
+
+    def fake_get(url, **kwargs):
+        from urllib.parse import urlparse, parse_qs
+        qs = parse_qs(urlparse(url).query)
+        pn = int(qs["pn"][0])
+        ps = int(qs["ps"][0])
+        captured_pn.append(pn)
+        start = cursor["i"]
+        chunk = all_bvids[start:start + ps]
+        cursor["i"] += len(chunk)
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "code": 0,
+            "data": {"list": {"vlist": [{"bvid": b} for b in chunk]}},
+        }
+        return mock_response
+
+    mock_client = MagicMock()
+    mock_client.__enter__.return_value.get.side_effect = fake_get
+    monkeypatch.setattr("httpx.Client", MagicMock(return_value=mock_client))
+
+    bvids = fetch_up_videos(uid=1, limit=130, cookie="SESSDATA=x")
+    assert len(bvids) == 130
+    assert captured_pn == [1, 2, 3]
+
+
+def test_stops_paginating_when_b_station_returns_empty(monkeypatch):
+    """B 站某页返回空 vlist → 停止翻页（UP 主没更多视频了）。"""
+    from b2text import upmaster
+    monkeypatch.setattr(upmaster._BILI_BUCKET, "acquire", lambda: None)
+
+    # UP 主只有 15 条视频；pn=3 会返回空
+    all_bvids = (
+        [f"BV1a{i}" for i in range(10)]
+        + [f"BV1b{i}" for i in range(5)]
+    )
+    cursor = {"i": 0}
+    call_count = {"n": 0}
+
+    def fake_get(url, **kwargs):
+        from urllib.parse import urlparse, parse_qs
+        qs = parse_qs(urlparse(url).query)
+        ps = int(qs["ps"][0])
+        start = cursor["i"]
+        chunk = all_bvids[start:start + ps]
+        cursor["i"] += len(chunk)
+        call_count["n"] += 1
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "code": 0,
+            "data": {"list": {"vlist": [{"bvid": b} for b in chunk]}},
+        }
+        return mock_response
+
+    mock_client = MagicMock()
+    mock_client.__enter__.return_value.get.side_effect = fake_get
+    monkeypatch.setattr("httpx.Client", MagicMock(return_value=mock_client))
+
+    # 请求 100，但 UP 主只有 15 条 — 应在 pn=3 看到空后停止
+    bvids = fetch_up_videos(uid=1, limit=100, cookie="SESSDATA=x")
+    assert len(bvids) == 15
+    # pn=1 返回 10, pn=2 返回 5; pn=3 会读到 []. 所以 2 次调用足够。
+    assert call_count["n"] == 2
+
+
+def test_limit_smaller_than_page_size_still_single_request(monkeypatch):
+    """limit < 50 时只发一次请求（pn=1）。"""
+    from b2text import upmaster
+    monkeypatch.setattr(upmaster._BILI_BUCKET, "acquire", lambda: None)
+
+    captured_pn: list[int] = []
+
+    def fake_get(url, **kwargs):
+        from urllib.parse import urlparse, parse_qs
+        qs = parse_qs(urlparse(url).query)
+        captured_pn.append(int(qs["pn"][0]))
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "code": 0,
+            "data": {"list": {"vlist": [{"bvid": f"BV1a{i}"} for i in range(10)]}},
+        }
+        return mock_response
+
+    mock_client = MagicMock()
+    mock_client.__enter__.return_value.get.side_effect = fake_get
+    monkeypatch.setattr("httpx.Client", MagicMock(return_value=mock_client))
+
+    bvids = fetch_up_videos(uid=1, limit=10, cookie="SESSDATA=x")
+    assert len(bvids) == 10
+    assert captured_pn == [1]
