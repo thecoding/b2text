@@ -229,7 +229,21 @@ def _list(args) -> int:
         print("（无任务）")
         return 0
     for row in rows:
-        print(f"[{row['status']:>9}] {row['id'][:8]}.. {row['type']}/{row['target_id']}")
+        # progress = {step, msg} 或 None（queued 还没跑过 / 没有日志）
+        prog = row.get("progress")
+        if prog:
+            step, msg = prog["step"], prog["msg"]
+            if msg == "start":
+                step_str = f"→ {step}"            # 正在跑
+            elif msg == "ok":
+                step_str = f"✓ {step}"            # 这步完成
+            elif msg == "fail":
+                step_str = f"✗ {step}"            # 这步失败
+            else:
+                step_str = f"  {step}"            # job_start / job_done 等
+        else:
+            step_str = "  -"
+        print(f"[{row['status']:>9}] {row['id'][:8]}.. {step_str:<20} {row['type']}/{row['target_id']}")
     return 0
 
 

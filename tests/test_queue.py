@@ -100,6 +100,32 @@ def test_recover_orphans_resets_running_to_queued(q):
     assert q.get(job_id)["status"] == JobStatus.QUEUED
 
 
+def test_count_returns_exact_number(q):
+    """count() 返回精确总数，不受 limit 影响。"""
+    # 入队 3 条
+    id_a = q.enqueue(type="bv", target_id="BV1a", output_dir="/tmp/a")
+    id_b = q.enqueue(type="bv", target_id="BV1b", output_dir="/tmp/b")
+    id_c = q.enqueue(type="bv", target_id="BV1c", output_dir="/tmp/c")
+    assert q.count() == 3
+    assert q.count(status=JobStatus.QUEUED) == 3
+
+    # 完成一条
+    q.claim_next()
+    q.finish(id_a)
+    assert q.count() == 3
+    assert q.count(status=JobStatus.QUEUED) == 2
+    assert q.count(status=JobStatus.DONE) == 1
+
+    # 失败一条
+    q.claim_next()
+    q.fail(id_b, error="err")
+    assert q.count(status=JobStatus.FAILED) == 1
+
+    # 取消一条
+    q.cancel(id_c)
+    assert q.count(status=JobStatus.CANCELLED) == 1
+
+
 def test_increment_retry_count(q):
     job_id = q.enqueue(type="bv", target_id="BV1xxx", output_dir="/tmp/out")
     q.increment_retry(job_id)
