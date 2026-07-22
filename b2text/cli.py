@@ -31,6 +31,18 @@ from b2text.paths import config_dir, data_dir, daemon_pid
 _BASE_URL = DEFAULT_BASE_URL
 
 
+def _daemon_unreachable_message(e: BaseException) -> str:
+    """统一处理 daemon 不可达的诊断信息。timeout 与连接被拒分别提示。"""
+    if isinstance(e, httpx.TimeoutException):
+        return (
+            f"❌ 连接 daemon 超时（{type(e).__name__}: {e}）。\n"
+            f"   这通常是 HTTP 代理劫持了 localhost 导致。绕开方法：\n"
+            f"     export NO_PROXY=127.0.0.1,localhost\n"
+            f"   然后重试。"
+        )
+    return "❌ daemon 未运行，先执行：b2text serve start"
+
+
 def _b2text_module_args() -> list[str]:
     return [sys.executable, "-m", "b2text.server"]
 
@@ -150,8 +162,8 @@ def _transcribe(args) -> int:
         bvid = _normalize_bv(args.id_or_uid)
         try:
             tid = submit_bv(_BASE_URL, bvid, args.output)
-        except (DaemonNotRunning, httpx.ConnectError):
-            print("❌ daemon 未运行，先执行：b2text serve start", flush=True)
+        except (DaemonNotRunning, httpx.RequestError) as e:
+            print(_daemon_unreachable_message(e), flush=True)
             return 1
         except Exception as e:
             print(f"❌ 提交失败：{e}", flush=True)
@@ -159,8 +171,8 @@ def _transcribe(args) -> int:
     else:
         try:
             tid = submit_up(_BASE_URL, args.id_or_uid, args.output, limit=args.limit)
-        except (DaemonNotRunning, httpx.ConnectError):
-            print("❌ daemon 未运行，先执行：b2text serve start", flush=True)
+        except (DaemonNotRunning, httpx.RequestError) as e:
+            print(_daemon_unreachable_message(e), flush=True)
             return 1
         except Exception as e:
             print(f"❌ 提交失败：{e}", flush=True)
@@ -181,8 +193,8 @@ def _normalize_bv(s: str) -> str:
 def _status(args) -> int:
     try:
         job = get_task(_BASE_URL, args.task_id)
-    except (DaemonNotRunning, httpx.ConnectError):
-        print("❌ daemon 未运行，先执行：b2text serve start")
+    except (DaemonNotRunning, httpx.RequestError) as e:
+        print(_daemon_unreachable_message(e))
         return 1
     except Exception as e:
         print(f"❌ 查询失败：{e}")
@@ -206,8 +218,8 @@ def _status(args) -> int:
 def _list(args) -> int:
     try:
         data = list_tasks(_BASE_URL, status=args.status)
-    except (DaemonNotRunning, httpx.ConnectError):
-        print("❌ daemon 未运行，先执行：b2text serve start")
+    except (DaemonNotRunning, httpx.RequestError) as e:
+        print(_daemon_unreachable_message(e))
         return 1
     except Exception as e:
         print(f"❌ 查询失败：{e}")
@@ -225,8 +237,8 @@ def _cancel(args) -> int:
     try:
         cancel_task(_BASE_URL, args.task_id)
         print(f"✅ 已请求取消 {args.task_id}")
-    except (DaemonNotRunning, httpx.ConnectError):
-        print("❌ daemon 未运行，先执行：b2text serve start")
+    except (DaemonNotRunning, httpx.RequestError) as e:
+        print(_daemon_unreachable_message(e))
         return 1
     except Exception as e:
         print(f"❌ 取消失败：{e}")
@@ -255,8 +267,6 @@ def _run(args) -> int:
         print(f"❌ {e}")
         return 4
 
-    bili_api.COOKIE = cookie
-
     import tempfile
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir = Path(tmpdir)
@@ -264,13 +274,13 @@ def _run(args) -> int:
         if not bvid:
             print(f"❌ 无法识别输入：{args.id_or_uid}")
             return 1
-        info = bili_api.get_video_info(bvid)
+        info = bili_api.get_video_info(bvid, cookie=cookie)
         if not info:
             print(f"❌ 获取视频信息失败：{bvid}")
             return 1
         print(f"📺 {info['title']}")
         page = info["pages"][0]
-        url = bili_api.get_audio_url(info["aid"], page["cid"])
+        url = bili_api.get_audio_url(info["aid"], page["cid"], cookie=cookie)
         if not url:
             print("❌ 获取音频链接失败")
             return 1
