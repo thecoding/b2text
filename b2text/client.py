@@ -67,3 +67,24 @@ def list_tasks(base_url: str, status: str | None = None) -> dict:
 def cancel_task(base_url: str, task_id: str) -> None:
     r = httpx.delete(f"{base_url}/tasks/{task_id}", timeout=10.0)
     r.raise_for_status()
+
+
+def cleanup_tasks(
+    base_url: str,
+    *,
+    status: str | None = None,
+    older_than_seconds: float | None = None,
+    all: bool = False,
+    cascade: bool = True,
+) -> int:
+    """DELETE /tasks，返回删除条数。"""
+    params: dict[str, str | float] = {"cascade": "true" if cascade else "false"}
+    if status is not None:
+        params["status"] = status
+    if older_than_seconds is not None:
+        params["older_than_seconds"] = older_than_seconds
+    if all:
+        params["all"] = "true"
+    r = httpx.delete(f"{base_url}/tasks", params=params, timeout=10.0)
+    r.raise_for_status()
+    return r.json()["deleted"]

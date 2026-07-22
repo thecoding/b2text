@@ -143,3 +143,102 @@ def test_requeue_resets_status_from_running(q):
     assert job["status"] == JobStatus.QUEUED
     assert job["started_at"] is None
     assert job["retry_count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# cleanup
+# ---------------------------------------------------------------------------
+
+
+def test_cleanup_by_status_deletes_only_matching(q):
+    """cleanup(status=failed) 只删 failed 行，不影响其他状态。"""
+    id_a = q.enqueue(type="bv", target_id="BV1a", output_dir="/tmp/a")
+    id_b = q.enqueue(type="bv", target_id="BV1b", output_dir="/tmp/b")
+    q.claim_next()
+    q.fail(id_a, error="boom")
+    assert q.count() == 2
+
+    deleted = q.cleanup(status=JobStatus.FAILED)
+    assert deleted == 1
+    assert q.get(id_a) is None
+    assert q.get(id_b) is not None
+
+
+def test_cleanup_by_age_deletes_only_old(q):
+    """cleanup(older_than_seconds=N) 只删 finished_at 早于 N 秒前的。"""
+    id_a = q.enqueue(type="bv", target_id="BV1a", output_dir="/tmp/a")
+    id_b = q.enqueue(type="bv", target_id="BV1b", output_dir="/tmp/b")
+    q.claim_next()
+    q.finish(id_a)
+    # id_a 刚 finish；id_b 还在 queued（finished_at=NULL）— 不应被时间过滤误删
+    time.sleep(0.05)
+    deleted = q.cleanup(older_than_seconds=0.01)
+    assert deleted == 1
+    assert q.get(id_a) is None
+    assert q.get(id_b) is not None
+
+
+def test_cleanup_all_deletes_everything(q):
+    id_a = q.enqueue(type="bv", target_id="BV1a", output_dir="/tmp/a")
+    id_b = q.enqueue(type="bv", target_id="BV1b", output_dir="/tmp/b")
+    q.claim_next()
+    q.finish(id_a)
+    assert q.count() == 2
+    deleted = q.cleanup(all=True)
+    assert deleted == 2
+    assert q.count() == 0
+
+
+def test_cleanup_cascades_to_children_of_up_jobs(q):
+    """删一个 up 任务时，其 bv 子任务（parent_id 指向它）也要被删除。"""
+    up_id = q.enqueue(type="up", target_id="486325909", output_dir="/tmp/o")
+    q.claim_next()
+    q.finish(up_id)  # up 任务通常立即 done
+
+    # 子任务由 fanout 创建
+    child_a = q.enqueue(type="bv", target_id="BV1aaa", output_dir="/tmp/o", parent_id=up_id)
+    child_b = q.enqueue(type="bv", target_id="BV1bbb", output_dir="/tmp/o", parent_id=up_id)
+    # 另一个无关 bv 任务，不应被删
+    other = q.enqueue(type="bv", target_id="BV1xxx", output_dir="/tmp/o")
+
+    deleted = q.cleanup(status=JobStatus.DONE, cascade=True)
+    # up + 2 个 child 被删，other 保留
+    assert deleted == 3
+    assert q.get(up_id) is None
+    assert q.get(child_a) is None
+    assert q.get(child_b) is None
+    assert q.get(other) is not None
+
+
+def test_cleanup_without_cascade_keeps_orphans(q):
+    """cascade=False 时，只删直接匹配的，不动子任务。"""
+    up_id = q.enqueue(type="up", target_id="486325909", output_dir="/tmp/o")
+    q.claim_next()
+    q.finish(up_id)
+    child = q.enqueue(type="bv", target_id="BV1aaa", output_dir="/tmp/o", parent_id=up_id)
+
+    deleted = q.cleanup(status=JobStatus.DONE, cascade=False)
+    assert deleted == 1
+    assert q.get(up_id) is None
+    assert q.get(child) is not None  # 留下孤儿
+
+
+def test_cleanup_no_args_returns_zero(q):
+    """不传任何过滤条件 = 啥也不删（避免误删）。"""
+    id_a = q.enqueue(type="bv", target_id="BV1a", output_dir="/tmp/a")
+    assert q.cleanup() == 0
+    assert q.get(id_a) is not None
+
+
+def test_cleanup_also_deletes_job_logs(q):
+    """删 job 的同时清掉对应 job_logs 行（不然 DB 越积越多）。"""
+    id_a = q.enqueue(type="bv", target_id="BV1a", output_dir="/tmp/a")
+    q.append_log(id_a, '{"msg": "hi"}')
+    q.append_log(id_a, '{"msg": "bye"}')
+    assert len(q.get_logs(id_a)) == 2
+
+    q.claim_next()
+    q.fail(id_a, error="boom")
+    deleted = q.cleanup(status=JobStatus.FAILED)
+    assert deleted == 1
+    assert q.get_logs(id_a) == []

@@ -208,3 +208,40 @@ def test_list_tasks_supports_pagination(app):
     assert body["total"] >= 5
     r2 = app.get("/tasks?limit=2&offset=2")
     assert len(r2.json()["tasks"]) == 2
+
+
+def test_delete_tasks_by_status(app):
+    """DELETE /tasks?status=failed 删除失败任务，body 返回 deleted 数。"""
+    for _ in range(2):
+        app.post("/transcribe", json={
+            "type": "bv", "id": "BV1xx", "output_dir": "/tmp/out"
+        })
+    # 标记两条为 failed
+    from b2text.queue import JobQueue
+    q = JobQueue(app.app.state.ctx.db_path)
+    try:
+        for jid in [t["id"] for t in q.list()]:
+            q.fail(jid, error="boom")
+    finally:
+        q.close()
+
+    r = app.request("DELETE", "/tasks?status=failed")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["deleted"] == 2
+
+
+def test_delete_tasks_no_filter_rejected(app):
+    """不带任何过滤条件时拒绝（避免误删全部任务）。"""
+    r = app.request("DELETE", "/tasks")
+    assert r.status_code == 400
+
+
+def test_delete_tasks_all_clears_everything(app):
+    app.post("/transcribe", json={"type": "bv", "id": "BV1a", "output_dir": "/tmp/o"})
+    app.post("/transcribe", json={"type": "bv", "id": "BV1b", "output_dir": "/tmp/o"})
+
+    r = app.request("DELETE", "/tasks?all=true")
+    assert r.status_code == 200
+    assert r.json()["deleted"] == 2
+    assert app.get("/tasks").json()["total"] == 0

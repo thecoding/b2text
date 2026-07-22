@@ -228,6 +228,24 @@ def build_app(ctx: AppContext) -> FastAPI:
             return JSONResponse({"status": "cancelled"}, status_code=200)
         raise HTTPException(409, detail="not cancellable in current status")
 
+    @app.delete("/tasks")
+    def bulk_delete_tasks(
+        status: str | None = Query(None),
+        older_than_seconds: float | None = Query(None, alias="older_than_seconds"),
+        all: bool = Query(False, alias="all"),
+        cascade: bool = Query(True),
+        queue: JobQueue = Depends(get_queue),
+    ):
+        """批量删除任务。必须传至少一个过滤条件，否则 400。"""
+        if status is None and older_than_seconds is None and not all:
+            raise HTTPException(400, detail="no filter provided (status/older_than/all)")
+        st = JobStatus(status) if status else None
+        deleted = queue.cleanup(
+            status=st, older_than_seconds=older_than_seconds,
+            all=all, cascade=cascade,
+        )
+        return {"deleted": deleted}
+
     return app
 
 

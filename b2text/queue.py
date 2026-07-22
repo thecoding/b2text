@@ -206,6 +206,77 @@ class JobQueue:
             cur = self._conn.execute("SELECT COUNT(*) FROM jobs")
         return cur.fetchone()[0]
 
+    # ---------- 清理 ----------
+    def cleanup(
+        self,
+        *,
+        status: JobStatus | None = None,
+        older_than_seconds: float | None = None,
+        all: bool = False,
+        cascade: bool = True,
+    ) -> int:
+        """删除匹配条件的 jobs（含 job_logs 行）。
+
+        参数（互斥；都不传 = 啥也不删，0）：
+            status: 只删指定状态的
+            older_than_seconds: 只删 finished_at 早于 now - N 的（其余状态不动）
+            all: 不管状态全删
+            cascade: 删完后再删 parent_id 指向被删项的 bv 子任务
+
+        返回删除总数。
+        """
+        if status is None and older_than_seconds is None and not all:
+            return 0
+
+        where_clauses: list[str] = []
+        params: list[Any] = []
+        if all:
+            pass  # no WHERE clause
+        elif status is not None:
+            where_clauses.append("status = ?")
+            params.append(status.value)
+        elif older_than_seconds is not None:
+            threshold = time.time() - older_than_seconds
+            where_clauses.append("finished_at IS NOT NULL AND finished_at < ?")
+            params.append(threshold)
+
+        where = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+
+        # 找出将被删的 id（cascade 需要知道父 id 集合）
+        cur = self._conn.execute(f"SELECT id FROM jobs{where}", params)
+        target_ids = [r[0] for r in cur.fetchall()]
+        if not target_ids:
+            return 0
+
+        def _placeholders_for(n: int) -> str:
+            return ",".join("?" * n)
+
+        # 先删 job_logs，避免外键孤行（虽然 schema 没 FK，但保持一致）
+        self._conn.execute(
+            f"DELETE FROM job_logs WHERE job_id IN ({_placeholders_for(len(target_ids))})",
+            target_ids,
+        )
+
+        if cascade:
+            # 把 parent_id IN (target_ids) 的 bv 子任务也加进来一起删
+            cur = self._conn.execute(
+                f"SELECT id FROM jobs WHERE parent_id IN ({_placeholders_for(len(target_ids))})",
+                target_ids,
+            )
+            child_ids = [r[0] for r in cur.fetchall()]
+            if child_ids:
+                self._conn.execute(
+                    f"DELETE FROM job_logs WHERE job_id IN ({_placeholders_for(len(child_ids))})",
+                    child_ids,
+                )
+                target_ids.extend(child_ids)
+
+        cur = self._conn.execute(
+            f"DELETE FROM jobs WHERE id IN ({_placeholders_for(len(target_ids))})",
+            target_ids,
+        )
+        return cur.rowcount
+
     # ---------- 内部 ----------
     def _row_to_dict(self, row: sqlite3.Row | tuple) -> dict[str, Any]:
         cols = (

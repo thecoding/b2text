@@ -23,6 +23,7 @@ import httpx
 from b2text.client import (
     DEFAULT_BASE_URL, DaemonNotRunning,
     submit_bv, submit_up, get_task, list_tasks, cancel_task,
+    cleanup_tasks,
 )
 from b2text.cookie_store import MissingCookieError, resolve_cookie
 from b2text.paths import config_dir, data_dir, daemon_pid
@@ -260,6 +261,76 @@ def _cancel(args) -> int:
     return 0
 
 
+def _parse_duration(s: str) -> float:
+    """把 '30d' / '24h' / '15m' 解析成秒数。"""
+    if not s:
+        raise ValueError("duration cannot be empty")
+    unit = s[-1].lower()
+    if unit not in "dhms":
+        raise ValueError(f"duration must end with d/h/m/s, got {s!r}")
+    try:
+        n = float(s[:-1])
+    except ValueError:
+        raise ValueError(f"invalid duration: {s!r}")
+    mult = {"d": 86400, "h": 3600, "m": 60, "s": 1}[unit]
+    return n * mult
+
+
+def _clean(args) -> int:
+    """删除任务。必须至少指定 --status / --older-than / --all 之一。"""
+    if not args.status and not args.older_than and not args.all:
+        print("❌ 必须指定至少一个过滤条件：--status / --older-than / --all")
+        return 2
+
+    older_than_seconds = None
+    if args.older_than:
+        try:
+            older_than_seconds = _parse_duration(args.older_than)
+        except ValueError as e:
+            print(f"❌ {e}")
+            return 2
+
+    # --all 二次确认
+    if args.all and not args.yes:
+        from b2text.queue import JobQueue
+        from b2text.paths import jobs_db
+        try:
+            q = JobQueue(jobs_db())
+            total = q.count()
+            q.close()
+        except Exception:
+            total = "?"
+        print(f"⚠️  将删除全部 {total} 条任务。继续？[y/N] ", end="", flush=True)
+        ans = input().strip().lower()
+        if ans != "y":
+            print("已取消。")
+            return 0
+
+    try:
+        deleted = cleanup_tasks(
+            _BASE_URL,
+            status=args.status,
+            older_than_seconds=older_than_seconds,
+            all=args.all,
+            cascade=not args.no_cascade,
+        )
+    except (DaemonNotRunning, httpx.RequestError) as e:
+        print(_daemon_unreachable_message(e))
+        return 1
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 400:
+            print(f"❌ {e.response.json().get('detail', 'bad request')}")
+            return 2
+        print(f"❌ 清理失败：{e}")
+        return 1
+    except Exception as e:
+        print(f"❌ 清理失败：{e}")
+        return 1
+
+    print(f"✅ 已清理 {deleted} 条任务")
+    return 0
+
+
 def _run(args) -> int:
     """本地直跑（不通过 daemon）。"""
     from b2text.transcriber import FunASRTranscriber
@@ -353,6 +424,19 @@ def build_parser() -> argparse.ArgumentParser:
     pc = sub.add_parser("cancel")
     pc.add_argument("task_id")
     pc.set_defaults(func=_cancel)
+
+    pcl = sub.add_parser("clean")
+    pcl.add_argument("--status", choices=JobStatus_str(), default=None,
+                     help="只删除指定状态的任务")
+    pcl.add_argument("--older-than", default=None,
+                     help="删除 N 天前/小时前完成的，如 30d / 24h / 15m")
+    pcl.add_argument("--all", action="store_true",
+                     help="删除全部任务（需 --yes 或交互确认）")
+    pcl.add_argument("--yes", action="store_true",
+                     help="跳过 --all 的二次确认")
+    pcl.add_argument("--no-cascade", action="store_true",
+                     help="不级联删除 up 任务的 bv 子任务")
+    pcl.set_defaults(func=_clean)
 
     pr = sub.add_parser("run")
     pr.add_argument("id_or_uid")

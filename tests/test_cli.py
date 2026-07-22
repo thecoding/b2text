@@ -126,3 +126,67 @@ class TestBuildParser:
         p = build_parser()
         with pytest.raises(SystemExit):
             p.parse_args(["transcribe", "BV1xxx"])
+
+
+class TestCleanSubcommand:
+    def test_clean_accepts_status(self):
+        from b2text.cli import build_parser
+        p = build_parser()
+        ns = p.parse_args(["clean", "--status", "failed"])
+        assert ns.status == "failed"
+        assert ns.older_than is None
+        assert ns.all is False
+
+    def test_clean_accepts_older_than(self):
+        from b2text.cli import build_parser
+        p = build_parser()
+        ns = p.parse_args(["clean", "--older-than", "30d"])
+        assert ns.older_than == "30d"
+        assert ns.all is False
+
+    def test_clean_accepts_all_with_yes(self):
+        from b2text.cli import build_parser
+        p = build_parser()
+        ns = p.parse_args(["clean", "--all", "--yes"])
+        assert ns.all is True
+        assert ns.yes is True
+
+
+class TestParseDuration:
+    def test_days(self):
+        from b2text.cli import _parse_duration
+        assert _parse_duration("7d") == 7 * 86400
+
+    def test_hours(self):
+        from b2text.cli import _parse_duration
+        assert _parse_duration("24h") == 24 * 3600
+
+    def test_minutes(self):
+        from b2text.cli import _parse_duration
+        assert _parse_duration("15m") == 15 * 60
+
+    def test_seconds(self):
+        from b2text.cli import _parse_duration
+        assert _parse_duration("90s") == 90
+
+    def test_rejects_unknown_unit(self):
+        from b2text.cli import _parse_duration
+        with pytest.raises(ValueError):
+            _parse_duration("5y")
+
+    def test_rejects_bad_format(self):
+        from b2text.cli import _parse_duration
+        with pytest.raises(ValueError):
+            _parse_duration("d")
+
+
+class TestCleanNoFilter:
+    """不传任何过滤条件 → 拒绝并返回 2（避免误删）。"""
+
+    def test_no_args_returns_2(self, monkeypatch, capsys):
+        from b2text.cli import build_parser, _clean
+        ns = build_parser().parse_args(["clean"])
+        rc = _clean(ns)
+        assert rc == 2
+        captured = capsys.readouterr()
+        assert "必须指定" in captured.out
