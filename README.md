@@ -223,9 +223,30 @@ b2text status <task_id>
 b2text list
 b2text list --status running
 
+# `b2text list` 的第三列显示当前进度：→ transcribe（正在跑）、
+# ✓ transcribe（这步完成）、✗ transcribe（这步失败），queued 且无日志时为 -。
+
 # 取消排队中的任务
 b2text cancel <task_id>
 ```
+
+### 清理任务
+
+`b2text list` 不会自动清掉历史失败/完成任务。手动清理：
+
+```bash
+b2text clean --status failed              # 删除所有失败（含其 up 任务的子任务）
+b2text clean --older-than 30d             # 删除 30 天前完成的（任何状态）
+b2text clean --all --yes                  # 清空全部任务（--yes 跳过确认）
+
+# 组合 / 精细控制
+b2text clean --status done --older-than 7d
+b2text clean --status failed --no-cascade # 不级联删除子任务
+```
+
+`--older-than` 支持单位 `s`/`m`/`h`/`d`（如 `30d`、`24h`、`15m`、`90s`）。`--all` 不传 `--yes` 会先打印当前任务数再问 `y/N`。
+
+> 后端限速：所有 B 站 API 调用（`get_video_info` / `get_audio_url` / UP 主 fanout）走同一个共享 token bucket（1 req/s, capacity 3），首次提交 burst 3 个，后续稳态 1 req/s，避免 code=-799。
 
 ### 看日志
 
