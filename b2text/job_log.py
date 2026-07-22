@@ -20,9 +20,11 @@ _TS_FORMAT = "%Y-%m-%dT%H:%M:%S.%f"
 class JobLog:
     """单一 job 的结构化日志写入器。线程不安全（每 job 实例化一次即可）。"""
 
-    def __init__(self, log_path: Path, *, job_id: str):
+    def __init__(self, log_path: Path, *, job_id: str, queue: "JobQueue | None" = None):
+        """queue 为可选参数；若传入，每条日志也会写入 SQLite job_logs 表。"""
         self.log_path = log_path
         self.job_id = job_id
+        self.queue = queue
         # 不创建父目录 — daemon 启动时统一建好
         # 暂存 set() 的字段，在下一次 step_start() 时合并进 extra
         self._pending: dict[str, Any] = {}
@@ -50,6 +52,9 @@ class JobLog:
         line = json.dumps(record, ensure_ascii=False)
         with self.log_path.open("a", encoding="utf-8") as f:
             f.write(line + "\n")
+        # 同步写入 SQLite job_logs 表（如果 queue 可用）
+        if self.queue is not None:
+            self.queue.append_log(self.job_id, line)
         # 实时同步到 stderr（daemon 模式不依赖 stdout）
         print(line, file=sys.stderr, flush=True)
 
