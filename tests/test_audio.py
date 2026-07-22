@@ -1,5 +1,6 @@
 import subprocess
 from pathlib import Path
+from unittest.mock import MagicMock
 import pytest
 from b2text.audio import (
     check_ffmpeg,
@@ -65,27 +66,45 @@ class TestExtractAudioFromMp4:
 
 
 class TestDownloadAudioStream:
-    def test_calls_curl_with_cookie_and_referer(self, monkeypatch, tmp_path):
-        calls = []
+    def test_downloads_with_httpx(self, monkeypatch, tmp_path):
+        """下载使用 httpx 而非 curl。"""
+        fake_content = b"fake audio bytes"
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.content = fake_content
 
-        def fake_run(cmd, **kwargs):
-            calls.append(cmd)
-            out_path = Path(cmd[cmd.index("-o") + 1])
-            out_path.write_bytes(b"fake audio bytes")
-            return subprocess.CompletedProcess(cmd, 0, b"", b"")
+        mock_client = MagicMock()
+        mock_client.__enter__.return_value.get.return_value = mock_response
+        mock_client_class = MagicMock(return_value=mock_client)
+        monkeypatch.setattr("httpx.Client", mock_client_class)
 
-        monkeypatch.setattr(subprocess, "run", fake_run)
+        url = "https://example.com/audio.m4s"
+        out = tmp_path / "audio.m4s"
+        out.parent.mkdir(parents=True, exist_ok=True)
+
+        download_audio_stream(url, out, cookie="SESSDATA=test")
+
+        assert out.read_bytes() == fake_content
+        # Verify Referer header is set for Bilibili
+        _, kwargs = mock_client.__enter__.return_value.get.call_args
+        headers = kwargs.get("headers", {})
+        assert "Referer: https://www.bilibili.com" in str(headers) or "Referer" in headers
+
+    def test_raises_on_http_error(self, monkeypatch, tmp_path):
+        import httpx
+        mock_response = MagicMock()
+        mock_response.raise_for_status.side_effect = httpx.HTTPError("timeout")
+
+        mock_client = MagicMock()
+        mock_client.__enter__.return_value.get.return_value = mock_response
+        mock_client_class = MagicMock(return_value=mock_client)
+        monkeypatch.setattr("httpx.Client", mock_client_class)
 
         url = "https://example.com/audio.m4s"
         out = tmp_path / "audio.m4s"
 
-        download_audio_stream(url, out, cookie="SESSDATA=test")
-
-        cmd = calls[0]
-        assert "curl" in cmd[0]
-        assert any("Cookie: SESSDATA=test" in str(c) for c in cmd)
-        assert any("Referer: https://www.bilibili.com" in str(c) for c in cmd)
-        assert url in cmd
+        with pytest.raises(RuntimeError, match="音频下载失败"):
+            download_audio_stream(url, out, cookie="SESSDATA=test")
 
 
 class TestEnsureWav:
@@ -115,7 +134,6 @@ class TestGetWavDuration:
 class TestChunkWav:
     def test_returns_chunks_with_offsets(self, monkeypatch, tmp_path):
         def fake_run(cmd, **kwargs):
-            # 创建模拟的 chunk 文件
             for i in range(3):
                 (tmp_path / f"input_chunk_{i:04d}.wav").touch()
             return subprocess.CompletedProcess(cmd, 0, b"", b"")

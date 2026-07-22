@@ -74,7 +74,7 @@ def test_bili_api_retries_3_times_then_fails(env, monkeypatch):
 
     call_count = {"n": 0}
 
-    def always_fail(bvid):
+    def always_fail(bvid, **kwargs):
         call_count["n"] += 1
         raise ConnectionError("network down")
 
@@ -101,7 +101,7 @@ def test_bili_api_succeeds_on_third_attempt(env, monkeypatch):
 
     attempts = {"n": 0}
 
-    def flaky(bvid):
+    def flaky(bvid, **kwargs):
         attempts["n"] += 1
         if attempts["n"] < 3:
             raise ConnectionError(f"attempt {attempts['n']} failed")

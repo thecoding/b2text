@@ -1,12 +1,13 @@
 """音频下载、抽取与 WAV 转换。
 
-依赖系统命令：ffmpeg、curl
+依赖系统命令：ffmpeg；HTTP 下载使用 httpx。
 """
+from __future__ import annotations
+
 import subprocess
 from pathlib import Path
 
-# 占位符：请替换为你的真实 cookie。详见 README 故障排查。
-COOKIE = "YOUR_BILIBILI_COOKIE_HERE"
+import httpx
 
 
 def check_ffmpeg() -> bool:
@@ -39,20 +40,20 @@ def extract_audio_from_mp4(mp4_path: Path, wav_path: Path) -> Path:
     return wav_path
 
 
-def download_audio_stream(url: str, output: Path, cookie: str = COOKIE) -> Path:
-    """用 curl 下载音频流（m4s）。失败抛 RuntimeError。"""
-    cmd = [
-        "curl", "-L", "-C", "-",
-        "-o", str(output),
-        "-H", f"Cookie: {cookie}",
-        "-H", "Referer: https://www.bilibili.com",
-        "-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "--max-time", "600",
-        url,
-    ]
-    result = subprocess.run(cmd, capture_output=True)
-    if result.returncode != 0:
-        raise RuntimeError(f"音频下载失败 (exit {result.returncode})")
+def download_audio_stream(url: str, output: Path, *, cookie: str) -> Path:
+    """用 httpx 下载音频流（m4s）。失败抛 RuntimeError。"""
+    headers = {
+        "Cookie": cookie,
+        "Referer": "https://www.bilibili.com",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    }
+    try:
+        with httpx.Client(timeout=600.0, follow_redirects=True) as client:
+            r = client.get(url, headers=headers)
+            r.raise_for_status()
+            output.write_bytes(r.content)
+    except httpx.HTTPError as e:
+        raise RuntimeError(f"音频下载失败: {e}")
     if not output.exists() or output.stat().st_size == 0:
         raise RuntimeError(f"音频下载失败：文件为空或不存在 {output}")
     return output

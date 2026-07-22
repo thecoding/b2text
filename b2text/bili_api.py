@@ -1,34 +1,38 @@
 # b2text/bili_api.py
-"""B站 API 客户端（curl 风格，复用现有下载器的 cookie 和调用模式）。"""
+"""B站 API 客户端（httpx，统一 cookie 参数传递）。"""
+from __future__ import annotations
+
 import json
-import subprocess
 from typing import Any
 
-# 占位符：请替换为你的真实 cookie。可在浏览器登录 B 站后从 DevTools 复制。
-# 至少需要 buvid3 / SESSDATA / bili_jct 三个字段。详见 README 故障排查。
-COOKIE = "YOUR_BILIBILI_COOKIE_HERE"
+import httpx
 
 _USER_AGENT = "Mozilla/5.0"
+_API_TIMEOUT = 20.0
 
 
-def api_get(url: str, cookie: str = COOKIE) -> dict[str, Any]:
+def _api_get(url: str, *, cookie: str) -> dict[str, Any]:
     """API GET 请求，返回 dict。失败返回 {}。"""
-    cmd = [
-        "curl", "-s", url,
-        "-H", f"User-Agent: {_USER_AGENT}",
-        "-H", f"Cookie: {cookie}",
-        "--max-time", "20",
-    ]
-    result = subprocess.run(cmd, capture_output=True)
     try:
-        return json.loads(result.stdout)
-    except (json.JSONDecodeError, ValueError):
+        with httpx.Client(timeout=_API_TIMEOUT) as client:
+            r = client.get(
+                url,
+                headers={
+                    "User-Agent": _USER_AGENT,
+                    "Cookie": cookie,
+                },
+            )
+            return r.json()
+    except Exception:
         return {}
 
 
-def get_video_info(bvid: str) -> dict[str, Any] | None:
+def get_video_info(bvid: str, *, cookie: str) -> dict[str, Any] | None:
     """获取视频信息（aid, title, pages, ugc_season）。失败返回 None。"""
-    data = api_get(f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}")
+    data = _api_get(
+        f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}",
+        cookie=cookie,
+    )
     if data.get("code") != 0 or "data" not in data:
         return None
     info = data["data"]
@@ -46,10 +50,11 @@ def get_video_info(bvid: str) -> dict[str, Any] | None:
     }
 
 
-def get_audio_url(aid: int, cid: int) -> str | None:
+def get_audio_url(aid: int, cid: int, *, cookie: str) -> str | None:
     """获取音频流直链。失败返回 None。"""
-    data = api_get(
-        f"https://api.bilibili.com/x/player/playurl?avid={aid}&cid={cid}&qn=80&fnval=4048&fnver=0&fourk=1"
+    data = _api_get(
+        f"https://api.bilibili.com/x/player/playurl?avid={aid}&cid={cid}&qn=80&fnval=4048&fnver=0&fourk=1",
+        cookie=cookie,
     )
     if data.get("code") != 0:
         return None
@@ -57,18 +62,3 @@ def get_audio_url(aid: int, cid: int) -> str | None:
     if not audio_list:
         return None
     return audio_list[0]["baseUrl"]
-
-
-def extract_series_videos(ugc_season: dict | None) -> list[dict[str, Any]]:
-    """从 ugc_season 提取所有视频（含 bvid, title, cid）。"""
-    if not ugc_season:
-        return []
-    videos = []
-    for section in ugc_season.get("sections", []):
-        for ep in section.get("episodes", []):
-            videos.append({
-                "bvid": ep.get("bvid"),
-                "title": ep.get("title", ""),
-                "cid": ep.get("cid"),
-            })
-    return videos
