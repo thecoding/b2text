@@ -10,7 +10,7 @@ import re
 import time
 import traceback
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Callable
 
 from b2text import audio as _audio
 from b2text import bili_api as _bili_api
@@ -40,31 +40,41 @@ class Worker:
         self._stopping = asyncio.Event()
 
     async def run_once(self) -> dict[str, Any] | None:
-        """取一条任务跑完整 pipeline。无任务返回 None。"""
+        """取一条任务跑完整 pipeline。无任务返回 None。
+
+        整个过程下沉到 default executor 跑（FunASR 推理 + 网络 I/O 全是阻塞调用），
+        否则会卡住 uvicorn event loop 导致 HTTP server 不响应。
+        """
+        return await asyncio.get_running_loop().run_in_executor(None, self._run_once_sync)
+
+    def _run_once_sync(self) -> dict[str, Any] | None:
         job = self.queue.claim_next()
         if job is None:
             return None
-        return await self._process(job)
+        return self._process_sync(job)
 
-    async def _process(self, job: dict[str, Any]) -> dict[str, Any]:
-        log = JobLog(self.log_path, job_id=job["id"])
+    def _process_sync(self, job: dict[str, Any]) -> dict[str, Any]:
+        import tempfile
+        log = JobLog(self.log_path, job_id=job["id"], queue=self.queue)
         log.info("job_start", step="_", extra={
             "type": job["type"], "target_id": job["target_id"], "output_dir": job["output_dir"],
         })
-        try:
-            for step_name, fn in self.steps.items():
-                log.step_start(step_name)
-                try:
-                    fn(job, log)
-                    log.step_ok(step_name)
-                except Exception as e:
-                    log.step_fail(step_name, exc_info=True)
-                    raise
-        except Exception as e:
-            err = f"{type(e).__name__}: {e}"
-            log.error("job_done", step="_", extra={"status": "failed", "error": err})
-            self.queue.fail(job["id"], error=err)
-            return self.queue.get(job["id"])  # type: ignore[return-value]
+        with tempfile.TemporaryDirectory(prefix="b2text_job_") as tmpdir_str:
+            job["_tmpdir"] = Path(tmpdir_str)
+            try:
+                for step_name, fn in self.steps.items():
+                    log.step_start(step_name)
+                    try:
+                        fn(job, log)
+                        log.step_ok(step_name)
+                    except Exception as e:
+                        log.step_fail(step_name, exc_info=True)
+                        raise
+            except Exception as e:
+                err = f"{type(e).__name__}: {e}"
+                log.error("job_done", step="_", extra={"status": "failed", "error": err})
+                self.queue.fail(job["id"], error=err)
+                return self.queue.get(job["id"])  # type: ignore[return-value]
 
         result_path = self._result_path_for(job) if job["type"] == "bv" else None
         log.info("job_done", step="_", extra={"status": "done", "result_path": result_path})
@@ -98,21 +108,20 @@ class Worker:
 def build_default_steps(*, cookie: str, transcriber, queue: JobQueue | None = None) -> dict[str, "Step"]:
     """构造一个完整的 pipeline（fanout + 七步），注入真实 bili_api / audio / transcriber。
 
-    bili_api 的 get_video_info / get_audio_url 不接受 cookie kwarg —— 通过设置
-    `b2text.bili_api.COOKIE = cookie` 模块级变量把当前 daemon cookie 注入。
+    cookie 通过闭包传给各步骤，不再依赖模块级全局变量。
     transcriber 是 FunASRTranscriber 实例（或者测试中 mock）。
     queue 传入后，retry 调用 increment_retry 累计重试次数（spec §5）。
     """
-    _bili_api.COOKIE = cookie  # 模块级注入（startup-once）
 
     delays = [1, 4, 16]  # 指数退避（spec §5）
     api_max_attempts = 3
 
-    def _with_api_retry(log, job, step_name, fn, *args):
+    def _with_api_retry(log, job, step_name, fn):
+        """fn 是一个无参 callable（thunk），内部捕获了要传递的参数。"""
         last_err = None
         for attempt in range(api_max_attempts):
             try:
-                return fn(*args)
+                return fn()
             except Exception as e:
                 last_err = e
                 if queue is not None:
@@ -149,7 +158,8 @@ def build_default_steps(*, cookie: str, transcriber, queue: JobQueue | None = No
         log.set(child_count=len(bvids))
 
     def get_video_info(job, log):
-        info = _with_api_retry(log, job, "get_video_info", _bili_api.get_video_info, job["target_id"])
+        info = _with_api_retry(log, job, "get_video_info",
+                               lambda: _bili_api.get_video_info(job["target_id"], cookie=cookie))
         if not info:
             raise RuntimeError(f"get_video_info failed for {job['target_id']}")
         job["_video_info"] = info
@@ -158,20 +168,19 @@ def build_default_steps(*, cookie: str, transcriber, queue: JobQueue | None = No
     def get_audio_url(job, log):
         info = job["_video_info"]
         cid = info["pages"][0]["cid"]
-        url = _with_api_retry(log, job, "get_audio_url", _bili_api.get_audio_url, info["aid"], cid)
+        url = _with_api_retry(log, job, "get_audio_url",
+                               lambda: _bili_api.get_audio_url(info["aid"], cid, cookie=cookie))
         if not url:
             raise RuntimeError("get_audio_url failed")
         job["_audio_url"] = url
 
     def download_audio(job, log):
-        import tempfile
-        tmpdir = Path(tempfile.mkdtemp(prefix="b2text_dl_"))
-        m4s = tmpdir / "audio.m4s"
+        m4s = job["_tmpdir"] / "audio.m4s"
         _audio.download_audio_stream(job["_audio_url"], m4s, cookie=cookie)
         job["_audio_path"] = m4s
 
     def convert_wav(job, log):
-        wav = job["_audio_path"].parent / "audio.wav"
+        wav = job["_tmpdir"] / "audio.wav"
         _audio.extract_audio_from_mp4(job["_audio_path"], wav)
         job["_wav_path"] = wav
 
@@ -189,10 +198,11 @@ def build_default_steps(*, cookie: str, transcriber, queue: JobQueue | None = No
     def normalize_write(job, log):
         segs = normalize_funasr_output(job["_raw_segments"])
         text = format_segments(segs)
-        out_path = str(Path(job["output_dir"]) / f"{re.sub(r'[<>:\"/\\|?*]', '_', job['target_id'])[:80]}.txt")
-        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
-        Path(out_path).write_text(text, encoding="utf-8")
-        log.set(segment_count=len(segs), output_path=out_path)
+        safe = re.sub(r'[<>:"/\\|?*]', "_", job["target_id"])[:80]
+        out_path = Path(job["output_dir"]) / f"{safe}.txt"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(text, encoding="utf-8")
+        log.set(segment_count=len(segs), output_path=str(out_path))
 
     return {
         "fanout": fanout,

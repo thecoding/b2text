@@ -52,7 +52,10 @@ class JobQueue:
     def __init__(self, db_path: Path):
         self.db_path = db_path
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(db_path), isolation_level=None)
+        # check_same_thread=False：worker 通过 run_in_executor 在独立线程里跑；
+        # FastAPI sync endpoints 通过 Depends 起独立连接、也在 threadpool 线程里跑。
+        # 配合 WAL 模式，sqlite3 自身加锁保证多线程访问安全。
+        self._conn = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA)
 
@@ -188,6 +191,20 @@ class JobQueue:
             "UPDATE jobs SET status=?, started_at=NULL WHERE id=?",
             (JobStatus.QUEUED.value, job_id),
         )
+
+    # ---------- 计数 ----------
+    def count(
+        self,
+        *,
+        status: JobStatus | None = None,
+    ) -> int:
+        if status is not None:
+            cur = self._conn.execute(
+                "SELECT COUNT(*) FROM jobs WHERE status=?", (status.value,)
+            )
+        else:
+            cur = self._conn.execute("SELECT COUNT(*) FROM jobs")
+        return cur.fetchone()[0]
 
     # ---------- 内部 ----------
     def _row_to_dict(self, row: sqlite3.Row | tuple) -> dict[str, Any]:
