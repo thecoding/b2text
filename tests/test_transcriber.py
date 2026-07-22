@@ -1,8 +1,11 @@
 # tests/test_transcriber.py
 import subprocess
+import sys
 import pytest
 from unittest.mock import MagicMock, patch
 from b2text.transcriber import FunASRTranscriber
+# 直接测试 _resolve_device 这个内部函数
+from b2text.transcriber import _resolve_device
 
 
 def _fake_short_duration(*args, **kwargs):
@@ -60,14 +63,23 @@ def test_handles_empty_generate_result():
 
 def test_uses_spk_num_when_provided():
     """spk_num 指定时传给 AutoModel。"""
-    from funasr import AutoModel as _AutoModel
-    import unittest.mock as mock
-
-    with mock.patch("funasr.AutoModel") as fake_cls:
+    # funasr 可能未安装，用 sys.modules 打桩避免 import 失败
+    fake_funasr = MagicMock()
+    fake_funasr.AutoModel = MagicMock()
+    old = sys.modules.get("funasr")
+    sys.modules["funasr"] = fake_funasr
+    try:
+        # 重新加载模块以触发懒加载路径
         transcriber = FunASRTranscriber(spk_num=3)
         transcriber._load_model()
-        _, kwargs = fake_cls.call_args
+        fake_funasr.AutoModel.assert_called_once()
+        _, kwargs = fake_funasr.AutoModel.call_args
         assert kwargs["spk_num"] == 3
+    finally:
+        if old is not None:
+            sys.modules["funasr"] = old
+        else:
+            del sys.modules["funasr"]
 
 
 def test_long_audio_is_chunked_and_offsets_applied():
@@ -132,3 +144,44 @@ def test_transcribe_real_audio(tmp_path):
     sample = tmp_path / "sample.wav"
     if not sample.exists():
         pytest.skip("no sample audio")
+class TestResolveDevice:
+    """_resolve_device: MPS 不可用时自动降级到 cpu。"""
+
+    def test_keeps_cpu_when_explicit(self):
+        assert _resolve_device("cpu") == "cpu"
+
+    def test_keeps_cuda_when_explicit(self):
+        assert _resolve_device("cuda") == "cuda"
+
+    def test_mps_falls_back_when_torch_mps_unavailable(self, monkeypatch):
+        """模拟 torch.backends.mps.is_available() == False。"""
+        import sys
+        fake_torch = type(sys)("torch")
+        fake_torch.backends = type(sys)("backends")
+        fake_torch.backends.mps = type(sys)("mps")
+        fake_torch.backends.mps.is_available = lambda: False
+        monkeypatch.setitem(sys.modules, "torch", fake_torch)
+        assert _resolve_device("mps") == "cpu"
+
+    def test_mps_stays_mps_when_available(self, monkeypatch):
+        """模拟 torch.backends.mps.is_available() == True。"""
+        import sys
+        fake_torch = type(sys)("torch")
+        fake_torch.backends = type(sys)("backends")
+        fake_torch.backends.mps = type(sys)("mps")
+        fake_torch.backends.mps.is_available = lambda: True
+        monkeypatch.setitem(sys.modules, "torch", fake_torch)
+        assert _resolve_device("mps") == "mps"
+
+    def test_mps_falls_back_when_no_backends_mps(self, monkeypatch):
+        """旧版本 torch 可能没有 backends.mps。"""
+        import sys
+        fake_torch = type(sys)("torch")
+        # 没有 fake_torch.backends.mps
+        fake_torch.backends = type(sys)("backends")
+        monkeypatch.setitem(sys.modules, "torch", fake_torch)
+        assert _resolve_device("mps") == "cpu"
+
+    def test_passes_through_funny_device_names(self):
+        assert _resolve_device("xla") == "xla"
+        assert _resolve_device("directml") == "directml"

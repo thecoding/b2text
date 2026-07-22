@@ -11,6 +11,18 @@ _CHUNK_THRESHOLD_SECONDS = 600   # 10 分钟
 _CHUNK_SIZE_SECONDS = 300        # 每片 5 分钟
 
 
+def _resolve_device(device: str) -> str:
+    """如果 device=mps 但当前环境不支持，静默降级到 cpu。"""
+    if device == "mps":
+        try:
+            import torch
+            if not torch.backends.mps.is_available():
+                return "cpu"
+        except (ImportError, AttributeError):
+            return "cpu"
+    return device
+
+
 class FunASRTranscriber:
     """Paraformer-large ASR + CAM++ 说话人日志 + FSMN-VAD 一体化封装。"""
 
@@ -25,7 +37,7 @@ class FunASRTranscriber:
         self.asr_model_name = asr_model
         self.vad_model_name = vad_model
         self.spk_model_name = spk_model
-        self.device = device
+        self.device = _resolve_device(device)
         self.spk_num = spk_num
         self._model = None  # 懒加载
 
