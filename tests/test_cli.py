@@ -1,4 +1,5 @@
 """tests/test_cli.py — CLI 入口：parser 构建 + 核心辅助函数。"""
+import sys
 import pytest
 from b2text.cli import build_parser, _normalize_bv, _b2text_module_args
 
@@ -83,6 +84,16 @@ class TestBuildParser:
         assert args.type == "up"
         assert args.id_or_uid == "12345"
         assert args.limit == 20
+        assert args.skip_existing is False
+
+    def test_transcribe_up_skip_existing(self):
+        """--skip-existing 解析为 True 并透传给 submit_up。"""
+        p = build_parser()
+        args = p.parse_args([
+            "transcribe", "12345", "-o", "/tmp/out",
+            "--type", "up", "--limit", "20", "--skip-existing",
+        ])
+        assert args.skip_existing is True
 
     def test_status(self):
         p = build_parser()
@@ -114,6 +125,26 @@ class TestBuildParser:
         p = build_parser()
         args = p.parse_args(["run", "BV1xxx", "-o", "/tmp/out.txt", "--device", "cpu"])
         assert args.device == "cpu"
+
+    def test_run_full_flags(self):
+        """run 应支持 --spk-num / --no-overwrite / --keep-audio / --batch。"""
+        p = build_parser()
+        args = p.parse_args([
+            "run", "BV1xxx", "-o", "/tmp/out", "--spk-num", "3",
+            "--no-overwrite", "--keep-audio", "--batch",
+        ])
+        assert args.spk_num == 3
+        assert args.no_overwrite is True
+        assert args.keep_audio is True
+        assert args.batch is True
+
+    def test_run_defaults(self):
+        p = build_parser()
+        args = p.parse_args(["run", "BV1xxx", "-o", "/tmp/out.txt"])
+        assert args.spk_num is None
+        assert args.no_overwrite is False
+        assert args.keep_audio is False
+        assert args.batch is False
 
     def test_serve_requires_subcommand(self):
         """'b2text serve' 不带子命令应报错。"""
@@ -183,10 +214,196 @@ class TestParseDuration:
 class TestCleanNoFilter:
     """不传任何过滤条件 → 拒绝并返回 2（避免误删）。"""
 
-    def test_no_args_returns_2(self, monkeypatch, capsys):
+    def test_no_args_returns_2(self, monkeypatch):
         from b2text.cli import build_parser, _clean
+        import io
+        buf = io.StringIO()
+        monkeypatch.setattr(sys, "stdout", buf)
         ns = build_parser().parse_args(["clean"])
         rc = _clean(ns)
         assert rc == 2
-        captured = capsys.readouterr()
-        assert "必须指定" in captured.out
+        assert "必须指定" in buf.getvalue()
+
+
+class TestRunLocalFile:
+    """b2text run 处理本地文件：转写、no-overwrite 跳过、keep-audio 复制。"""
+
+    def _setup(self, monkeypatch, tmp_path):
+        import b2text.transcriber as tmod
+        from b2text.cli import build_parser, _run
+
+        wav = tmp_path / "input.wav"
+        wav.write_bytes(b"RIFFxxxx")
+        out = tmp_path / "out.txt"
+
+        state = {"transcribe_calls": 0}
+
+        class FakeTranscriber:
+            def __init__(self, **kwargs):
+                state["kwargs"] = kwargs
+
+            def transcribe(self, path):
+                state["transcribe_calls"] += 1
+                return [{"start": 0, "end": 1.0, "sentence": "你好世界", "spk": 0}]
+
+        monkeypatch.setattr(tmod, "FunASRTranscriber", FakeTranscriber)
+        monkeypatch.setattr("b2text.audio.check_ffmpeg", lambda: True)
+        return _run, build_parser(), wav, out, state
+
+    def test_local_wav_writes_output_and_keeps_audio(self, monkeypatch, tmp_path):
+        _run, parser, wav, out, state = self._setup(monkeypatch, tmp_path)
+        ns = parser.parse_args([
+            "run", str(wav), "-o", str(out),
+            "--device", "cpu", "--spk-num", "2", "--keep-audio",
+        ])
+        assert _run(ns) == 0
+        assert state["kwargs"] == {"device": "cpu", "spk_num": 2}
+        text = out.read_text(encoding="utf-8")
+        assert "[00:00:00] Speaker_1: 你好世界" in text
+        kept = tmp_path / "out.wav"
+        assert kept.exists()
+
+    def test_local_wav_no_overwrite_skips(self, monkeypatch, tmp_path):
+        _run, parser, wav, out, state = self._setup(monkeypatch, tmp_path)
+        out.write_text("已存在", encoding="utf-8")
+        ns = parser.parse_args([
+            "run", str(wav), "-o", str(out), "--no-overwrite",
+        ])
+        assert _run(ns) == 0
+        assert state["transcribe_calls"] == 0
+        assert out.read_text(encoding="utf-8") == "已存在"
+
+
+class TestLegacyShim:
+    """bilibili_to_text.py 旧用法应自动补 run 子命令。"""
+
+    def _main(self, monkeypatch, argv):
+        import bilibili_to_text
+        captured = {}
+        real_main = bilibili_to_text.cli_main
+
+        def fake_cli_main():
+            captured["argv"] = list(sys.argv[1:])
+            return 0
+
+        monkeypatch.setattr(bilibili_to_text, "cli_main", fake_cli_main)
+        try:
+            rc = bilibili_to_text.main(argv)
+        finally:
+            monkeypatch.setattr(bilibili_to_text, "cli_main", real_main)
+        return rc, captured
+
+    def test_legacy_args_get_run_prepended(self, monkeypatch):
+        rc, captured = self._main(monkeypatch, ["BV1xxx", "-o", "/tmp/x.txt"])
+        assert rc == 0
+        assert captured["argv"] == ["run", "BV1xxx", "-o", "/tmp/x.txt"]
+
+    def test_known_subcommand_passes_through(self, monkeypatch):
+        rc, captured = self._main(monkeypatch, ["serve", "status"])
+        assert rc == 0
+        assert captured["argv"] == ["serve", "status"]
+
+    def test_empty_argv_passes_through(self, monkeypatch):
+        rc, captured = self._main(monkeypatch, [])
+        assert rc == 0
+        assert captured["argv"] == []
+
+
+class TestRunBatch:
+    """b2text run --batch 展开 ugc_season，每集一个 txt。"""
+
+    def test_batch_writes_one_file_per_episode(self, monkeypatch, tmp_path):
+        from b2text import bili_api
+        import b2text.transcriber as tmod
+        from b2text.cli import build_parser, _run
+
+        out_dir = tmp_path / "texts"
+        calls = {"transcribe": 0, "download": 0}
+        fake_info = {
+            "title": "测试合集",
+            "ugc_season": {"sections": [{"episodes": [
+                {"bvid": "BV1a", "title": "第1集", "cid": 101, "aid": 1},
+                {"bvid": "BV1b", "title": "第2集", "cid": 102, "aid": 2},
+            ]}]},
+        }
+
+        class FakeTranscriber:
+            def __init__(self, **kwargs):
+                pass
+
+            def transcribe(self, path):
+                calls["transcribe"] += 1
+                return [{"start": 0, "end": 1.0, "sentence": "转写内容", "spk": 0}]
+
+        monkeypatch.setattr(tmod, "FunASRTranscriber", FakeTranscriber)
+        monkeypatch.setattr("b2text.audio.check_ffmpeg", lambda: True)
+        monkeypatch.setattr(
+            bili_api, "get_video_info",
+            lambda bvid, **kw: fake_info,
+        )
+        monkeypatch.setattr(
+            bili_api, "get_audio_url",
+            lambda aid, cid, **kw: f"https://example/{aid}/{cid}",
+        )
+
+        def fake_download(url, output, **kw):
+            calls["download"] += 1
+            output.write_bytes(b"m4s")
+            return output
+
+        monkeypatch.setattr("b2text.audio.download_audio_stream", fake_download)
+
+        def fake_ensure_wav(source, output_dir):
+            wav = output_dir / "audio.wav"
+            wav.write_bytes(b"RIFF")
+            return wav
+
+        monkeypatch.setattr("b2text.audio.ensure_wav", fake_ensure_wav)
+
+        ns = build_parser().parse_args([
+            "run", "BV1collection", "-o", str(out_dir), "--batch",
+        ])
+        assert _run(ns) == 0
+        files = sorted(p.name for p in out_dir.glob("*.txt"))
+        assert files == ["001_第1集.txt", "002_第2集.txt"]
+        assert calls["transcribe"] == 2
+        assert calls["download"] == 2
+
+    def test_batch_requires_cookie(self, monkeypatch, tmp_path):
+        """batch 走 B 站 API，没有 cookie 应返回 4。"""
+        from b2text import cli
+        monkeypatch.setattr("b2text.audio.check_ffmpeg", lambda: True)
+        monkeypatch.setattr(
+            cli, "resolve_cookie",
+            lambda: (_ for _ in ()).throw(cli.MissingCookieError("no cookie")),
+        )
+        ns = cli.build_parser().parse_args([
+            "run", "BV1collection", "-o", str(tmp_path), "--batch",
+        ])
+        assert cli._run(ns) == 4
+
+
+class TestRunBiliBusinessError:
+    """B 站业务错误时，b2text run 应友好提示 code/message 而不是裸 traceback。"""
+
+    def test_run_shows_business_error_message(self, monkeypatch, tmp_path):
+        import io
+        from b2text import cli
+        from b2text.bili_api import BiliAPIError
+
+        monkeypatch.setattr("b2text.audio.check_ffmpeg", lambda: True)
+        monkeypatch.setattr(cli, "resolve_cookie", lambda: "SESSDATA=x")
+
+        def boom(bvid, **kwargs):
+            raise BiliAPIError(code=-352, message="请求被拦截", url="https://example.com/view")
+
+        monkeypatch.setattr("b2text.bili_api.get_video_info", boom)
+
+        buf = io.StringIO()
+        monkeypatch.setattr(sys, "stdout", buf)
+        ns = cli.build_parser().parse_args([
+            "run", "BV1xxx", "-o", str(tmp_path / "out.txt"),
+        ])
+        assert cli._run(ns) == 1
+        assert "-352" in buf.getvalue()
+        assert "请求被拦截" in buf.getvalue()

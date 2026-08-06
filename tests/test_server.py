@@ -38,6 +38,57 @@ def test_post_transcribe_returns_task_id(app):
     assert len(body["task_id"]) > 0
 
 
+def test_post_transcribe_output_dir_defaults_to_data_dir(app):
+    """扩展提交时可不传 output_dir，落到 data_dir/extension。"""
+    from b2text.paths import data_dir
+    r = app.post("/transcribe", json={"type": "bv", "id": "BV1xxx"})
+    assert r.status_code == 200
+    job = app.get(f"/tasks/{r.json()['task_id']}").json()
+    assert job["output_dir"] == str(data_dir() / "extension")
+
+
+def test_cors_headers_present(app):
+    """本地 daemon 需允许扩展来源（chrome-extension:// Origin）。"""
+    r = app.get("/health", headers={"Origin": "chrome-extension://abcdef"})
+    assert r.status_code == 200
+    assert r.headers.get("access-control-allow-origin") == "*"
+
+
+def test_get_segments_202_until_done_then_returns_timeline(app):
+    """任务未完成时 /segments 返回 202+状态；完成后返回时间线与时长。"""
+    from b2text.queue import JobQueue, JobStatus
+    r = app.post("/transcribe", json={"type": "bv", "id": "BV1seg", "output_dir": "/tmp/out"})
+    task_id = r.json()["task_id"]
+
+    r = app.get(f"/tasks/{task_id}/segments")
+    assert r.status_code == 202
+    assert r.json()["status"] == "queued"
+
+    q = JobQueue(app.app.state.ctx.db_path)
+    try:
+        q.finish(task_id, result_path="/tmp/out/BV1seg.txt")
+        q.save_segments(task_id, [
+            {"start": 0.0, "end": 1.5, "speaker": "Speaker_1", "text": "第一句"},
+            {"start": 1.5, "end": 3.0, "speaker": "Speaker_2", "text": "第二句"},
+        ])
+    finally:
+        q.close()
+
+    r = app.get(f"/tasks/{task_id}/segments")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == JobStatus.DONE.value
+    assert len(body["segments"]) == 2
+    assert body["segments"][0] == {
+        "start": 0.0, "end": 1.5, "speaker": "Speaker_1", "text": "第一句",
+    }
+    assert body["duration"] == 3.0
+
+
+def test_get_segments_404_for_unknown_task(app):
+    assert app.get("/tasks/nope/segments").status_code == 404
+
+
 def test_post_transcribe_rejects_bad_id(app):
     r = app.post("/transcribe", json={"type": "bv", "id": "not-a-bvid", "output_dir": "/tmp/out"})
     assert r.status_code == 400

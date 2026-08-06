@@ -9,7 +9,7 @@
 - 📦 完全本地，无云服务依赖（FunASR 后端）
 - 🔌 **omlx 后端（待实现）**：计划调用本地 omlx 服务的 `/v1/audio/transcriptions`。当前代码尚未包含；需要 omlx ≥ 0.5.0 才暴露该路由
 - 🎯 输出 `[HH:MM:SS] Speaker_N: 文字` 格式（FunASR 后端）
-- 📚 支持 BV 号、URL、本地 mp4 / wav 输入
+- 📚 支持 BV 号、URL、本地 mp4 / wav / m4s 输入
 - 🗂️ 自动识别合集（ugc_season），支持批量转写
 
 ## 安装
@@ -27,31 +27,38 @@ pip install -e .[dev]   # 运行时依赖 + pytest；只想用 CLI 不写测试�
 ## 快速开始
 
 ```bash
-# 从 BV 号下载并转写
-python bilibili_to_text.py BV1xxxxxxxxxx -o output.txt
+# 从 BV 号下载并转写（本地直跑，不走 daemon）
+b2text run BV1xxxxxxxxxx -o output.txt
 
 # 处理已有的本地 mp4
-python bilibili_to_text.py ./downloads/xxx/001.mp4 -o output.txt
+b2text run ./downloads/xxx/001.mp4 -o output.txt
 
 # 批量合集（自动展开 ugc_season，每集一个 txt）
-python bilibili_to_text.py BV1xxxxxxxxxx --batch -o ./texts/
+b2text run BV1xxxxxxxxxx --batch -o ./texts/
 ```
+
+旧入口 `python bilibili_to_text.py ...` 完全等价：第一个参数不是子命令时会自动
+补上 `run`，所以 `python bilibili_to_text.py BV1xxxxxxxxxx -o output.txt`、
+`python bilibili_to_text.py ./a.mp4 -o output.txt` 照旧可用。
 
 ## 用法
 
 ```
-python bilibili_to_text.py <BV号|URL|mp4|wav路径> -o <输出路径> [选项]
+b2text run <BV号|URL|mp4|wav路径> -o <输出路径> [选项]
 ```
 
 | 参数 | 说明 |
 | --- | --- |
-| `input` | BV 号、URL、本地 mp4 / wav / m4s 路径（自动识别） |
+| `id_or_uid` | BV 号、URL、本地 mp4 / wav / m4s 路径（自动识别） |
 | `-o` / `--output` | 单文件模式：输出 txt 路径；批量模式：输出目录 |
 | `--batch` | 批量模式：处理 `ugc_season` 合集所有视频 |
 | `--device mps\|cpu` | 推理设备。默认 `mps`（Apple Silicon 加速），Intel Mac 用 `cpu` |
 | `--spk-num N` | 已知说话人数量。指定后可提升多说话人日志的准确度 |
 | `--no-overwrite` | 跳过已存在的输出文件（默认覆盖） |
 | `--keep-audio` | 在输出目录保留 wav 文件，便于复现或调试 |
+
+> `--batch` 只对合集（`ugc_season`）生效；单 P 视频传了 `--batch` 会提示"不是合集"。
+> 本地文件无需 B 站 cookie，只有走 B 站 API 下载时才需要。
 
 ## 输出格式
 
@@ -128,6 +135,15 @@ pytest -v                          # 全部测试（集成测试需 FunASR + 模
 pytest -m "not integration" -v     # 仅单元测试（无需模型）
 ```
 
+> **macOS 上 `pytest` 启动即段错误？** Python 3.12 的 readline 与 macOS libedit
+> 在某些构建下不兼容，pytest 9 的 capture 插件启动时会 `import readline` 直接崩溃。
+> 临时绕开：
+> ```bash
+> pytest -p no:cacheprovider -p no:capture
+> ```
+> 本项目测试不依赖 capture 输出捕获（`capsys` 相关用例已改为不依赖该 fixture），
+> 所以关闭 capture 可以全量运行。
+
 ## 故障排查
 
 **`未找到 ffmpeg`**
@@ -167,6 +183,10 @@ sudo apt install ffmpeg   # Linux
 python bilibili_to_text.py BV1xxxxxxxxxx -o output.txt --device cpu
 ```
 
+**`pytest` 启动即 Segmentation fault**
+
+见上文「测试」一节；macOS readline/libedit 冲突导致，用 `-p no:capture` 绕开。
+
 **模型重新下载**
 
 ```bash
@@ -204,7 +224,8 @@ chmod 600 ~/.config/b2text/cookie
 ### 启动
 
 ```bash
-b2text serve start
+b2text serve start                  # 默认端口 8765
+b2text serve start --port 9000      # 自定义端口（需同步改 client 端的 BASE_URL 才能连上）
 # 等几十秒模型加载完成
 b2text serve status   # 看 model_loaded=true 后再提交任务
 ```
@@ -215,13 +236,19 @@ b2text serve status   # 看 model_loaded=true 后再提交任务
 # 单个 BV
 b2text transcribe BV1xxxxxxxxx -o /Users/me/sourceRead/
 
-# 整个 UP 主（默认最新 50 条，可用 --limit 限制）
+# 整个 UP 主（默认最新 50 条，可用 --limit 指定总数）
 b2text transcribe --type up 12345678 -o /Users/me/sourceRead/ --limit 30
+
+# 超过 50 条时自动翻页，直到拿够指定数量或 UP 主没有更多视频
+b2text transcribe --type up 12345678 -o /Users/me/sourceRead/ --limit 100
+
+# 跳过已转写过的视频（output_dir 下已有同名 .txt 就跳过，避免重复）
+b2text transcribe --type up 12345678 -o /Users/me/sourceRead/ --limit 100 --skip-existing
 
 # 查状态
 b2text status <task_id>
 b2text list
-b2text list --status running
+b2text list --status running    # 也可 --status queued/done/failed/cancelled
 
 # `b2text list` 的第三列显示当前进度：→ transcribe（正在跑）、
 # ✓ transcribe（这步完成）、✗ transcribe（这步失败），queued 且无日志时为 -。
@@ -246,12 +273,17 @@ b2text clean --status failed --no-cascade # 不级联删除子任务
 
 `--older-than` 支持单位 `s`/`m`/`h`/`d`（如 `30d`、`24h`、`15m`、`90s`）。`--all` 不传 `--yes` 会先打印当前任务数再问 `y/N`。
 
+> UP 主批量提交：B 站列表接口单页最多返回 50 条。`--limit N`（默认 50）表示本次最多提交 N 个视频；当 N > 50 时会按 `pn=1,2,...` 自动翻页，并在达到 N 条或接口返回空列表时停止。每页请求都会经过共享限速器，因此大量视频的提交阶段需要一定时间。
+>
+> `--skip-existing`：UP 任务入队前检查 `output_dir/<bvid>.txt` 是否存在，存在则不入队并跳过。fanout 完成时日志会写 `skipped_existing=N`，方便看跳过了多少。可与 `--limit` 配合：用同一份 output_dir 反复跑也不会重复转写已完成的视频。
+>
 > 后端限速：所有 B 站 API 调用（`get_video_info` / `get_audio_url` / UP 主 fanout）走同一个共享 token bucket（1 req/s, capacity 3），首次提交 burst 3 个，后续稳态 1 req/s，避免 code=-799。
 
 ### 看日志
 
 ```bash
-b2text serve logs                       # tail daemon.log
+b2text serve logs                       # tail daemon.log（默认最后 50 行）
+b2text serve logs -n 200                # 改成 200 行
 cat ~/.local/share/b2text/jobs.log      # 结构化 JSON Lines（每任务每步一行）
 ```
 
@@ -273,3 +305,9 @@ b2text run BV1xxxxxxxxx -o /tmp/x.txt
 
 - 设计 spec: `docs/superpowers/specs/2026-07-10-b2text-design.md`
 - 实施计划: `docs/superpowers/plans/2026-07-10-b2text.md`
+
+## Chrome 扩展（看视频时按句跳转）
+
+`chrome-extension/` 下有一个配套 Chrome 扩展：在看 B 站视频时自动把当前
+BV 号提交给本地 daemon 转写，拿回时间线后用快捷键跳上一句/下一句，可显示
+转写文字层或遮挡层。详见 [chrome-extension/README.md](chrome-extension/README.md)。

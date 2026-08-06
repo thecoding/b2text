@@ -5,6 +5,17 @@ from unittest.mock import MagicMock
 from b2text.upmaster import fetch_up_videos, UpmasterAPIError
 
 
+@pytest.fixture(autouse=True)
+def _fake_wbi_signature(monkeypatch):
+    """wbi 签名需要网络拉取 img/sub key；单测里换成固定签名，避免真实请求。"""
+    import time
+
+    def fake_sign(params, *, cookie, ua):
+        return {**params, "wts": str(int(time.time())), "w_rid": "0" * 32}
+
+    monkeypatch.setattr("b2text.upmaster.sign_query", fake_sign)
+
+
 def _mock_httpx_get(monkeypatch, json_data=None):
     mock_response = MagicMock()
     mock_response.json.return_value = json_data or {}
@@ -33,8 +44,8 @@ def test_returns_bvid_list_within_limit(monkeypatch):
     assert bvids == ["BV1aaa", "BV1bbb"]
 
 
-def test_clamps_limit_to_max_50(monkeypatch):
-    """B 站单页最多 50，limit > 50 时取 50。"""
+def test_clamps_page_size_to_max_50(monkeypatch):
+    """B 站 wbi/arc/search 单页最多 50；limit > 50 时取 50。"""
     captured = {}
 
     def capturing_get(url, **kwargs):
@@ -53,6 +64,9 @@ def test_clamps_limit_to_max_50(monkeypatch):
 
     fetch_up_videos(uid=1, limit=999, cookie="SESSDATA=x")
     assert "ps=50" in captured["url"]  # 最大 50
+
+    # 用的是 wbi/arc/search（新 endpoint），不是旧的 arc/search
+    assert "wbi/arc/search" in captured["url"]
 
 
 def test_raises_on_api_error(monkeypatch):
@@ -135,7 +149,6 @@ def test_paginates_when_limit_exceeds_page_size(monkeypatch):
         + [f"BV1q{i:02d}" for i in range(50)]
         + [f"BV1r{i:02d}" for i in range(30)]
     )
-    # cursor 模拟 B 站：每次请求返回 ps 条、按 cursor 推进。
     cursor = {"i": 0}
     captured_pn: list[int] = []
 
@@ -196,15 +209,15 @@ def test_stops_paginating_when_b_station_returns_empty(monkeypatch):
     mock_client.__enter__.return_value.get.side_effect = fake_get
     monkeypatch.setattr("httpx.Client", MagicMock(return_value=mock_client))
 
-    # 请求 100，但 UP 主只有 15 条 — 应在 pn=3 看到空后停止
+    # 请求 100，但 UP 主只有 15 条 — 应在 pn=2 看到空后停止
     bvids = fetch_up_videos(uid=1, limit=100, cookie="SESSDATA=x")
     assert len(bvids) == 15
-    # pn=1 返回 10, pn=2 返回 5; pn=3 会读到 []. 所以 2 次调用足够。
+    # ps=50, pn=1 返回 15 (一次拿完); pn=2 会读到 []. 所以 2 次调用足够。
     assert call_count["n"] == 2
 
 
 def test_limit_smaller_than_page_size_still_single_request(monkeypatch):
-    """limit < 50 时只发一次请求（pn=1）。"""
+    """limit <= 10 时只发一次请求（pn=1）。"""
     from b2text import upmaster
     monkeypatch.setattr(upmaster._BILI_BUCKET, "acquire", lambda: None)
 

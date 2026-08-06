@@ -7,6 +7,7 @@ from b2text.audio import (
     chunk_wav,
     extract_audio_from_mp4,
     download_audio_stream,
+    download_audio_stream_candidates,
     ensure_wav,
     get_wav_duration_seconds,
 )
@@ -105,6 +106,63 @@ class TestDownloadAudioStream:
 
         with pytest.raises(RuntimeError, match="音频下载失败"):
             download_audio_stream(url, out, cookie="SESSDATA=test")
+
+
+class TestDownloadAudioStreamCandidates:
+    def _fake_client(self, monkeypatch, fail_urls):
+        import httpx
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                self.calls = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def get(self, url, **kwargs):
+                self.calls.append(url)
+                r = MagicMock()
+                if url in fail_urls:
+                    r.raise_for_status.side_effect = httpx.HTTPError("503")
+                else:
+                    r.raise_for_status.return_value = None
+                    r.content = b"ok-bytes"
+                return r
+
+        fake = FakeClient()
+        monkeypatch.setattr("httpx.Client", lambda **kw: fake)
+        return fake
+
+    def test_falls_back_to_second_candidate(self, monkeypatch, tmp_path):
+        fake = self._fake_client(monkeypatch, fail_urls={"https://cdn1/m.m4s"})
+        out = tmp_path / "a.m4s"
+        download_audio_stream_candidates(
+            ["https://cdn1/m.m4s", "https://cdn2/m.m4s"],
+            out,
+            cookie="SESSDATA=x",
+            attempts_per_url=1,
+            gap_seconds=0,
+        )
+        assert fake.calls == ["https://cdn1/m.m4s", "https://cdn2/m.m4s"]
+        assert out.read_bytes() == b"ok-bytes"
+
+    def test_all_fail_raises_with_candidate_count(self, monkeypatch, tmp_path):
+        self._fake_client(monkeypatch, fail_urls={"u1", "u2"})
+        with pytest.raises(RuntimeError, match="2 个 CDN 地址"):
+            download_audio_stream_candidates(
+                ["u1", "u2"],
+                tmp_path / "a.m4s",
+                cookie="SESSDATA=x",
+                attempts_per_url=1,
+                gap_seconds=0,
+            )
+
+    def test_empty_candidates_raise(self, tmp_path):
+        with pytest.raises(RuntimeError, match="没有可用"):
+            download_audio_stream_candidates([], tmp_path / "a.m4s", cookie="SESSDATA=x")
 
 
 class TestEnsureWav:

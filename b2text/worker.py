@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import asyncio
-import re
 import time
 import traceback
 from pathlib import Path
@@ -17,6 +16,7 @@ from b2text import bili_api as _bili_api
 from b2text.formatter import format_segments
 from b2text.job_log import JobLog
 from b2text.normalizer import normalize_funasr_output
+from b2text.output import output_path_for_bvid
 from b2text.queue import JobQueue, JobStatus
 
 
@@ -84,8 +84,7 @@ class Worker:
     @staticmethod
     def _result_path_for(job: dict[str, Any]) -> str:
         """默认结果路径：<output_dir>/<safe_target_id>.txt。"""
-        safe = re.sub(r'[<>:"/\\|?*]', "_", job["target_id"])[:80]
-        return str(Path(job["output_dir"]) / f"{safe}.txt")
+        return str(output_path_for_bvid(job["output_dir"], job["target_id"]))
 
     async def serve_forever(self) -> None:
         """无限循环：取 → 处理 → 等。cancel 后优雅退出。"""
@@ -113,26 +112,55 @@ def build_default_steps(*, cookie: str, transcriber, queue: JobQueue | None = No
     queue 传入后，retry 调用 increment_retry 累计重试次数（spec §5）。
     """
 
-    delays = [1, 4, 16]  # 指数退避（spec §5）
+    delays = [1, 4, 16]  # 默认指数退避（瞬时错误：网络、5xx 等）
     api_max_attempts = 3
+    # B站 -799（请求过于频繁）触发限速，限速窗口通常远大于 16s；
+    # 用 60/300/600s 退避并联动 bucket.cooldown，让 daemon 自己等、不要在风控期内继续打 API。
+    rate_limit_delays = [60, 300, 600]
+    rate_limit_max_attempts = 3
+
+    def _is_rate_limited(exc: BaseException) -> bool:
+        from b2text.upmaster import UpmasterAPIError
+        return isinstance(exc, UpmasterAPIError) and exc.code == -799
 
     def _with_api_retry(log, job, step_name, fn):
-        """fn 是一个无参 callable（thunk），内部捕获了要传递的参数。"""
+        """fn 是一个无参 callable（thunk），内部捕获了要传递的参数。
+
+        普通错误走 1/4/16s 退避；-799 走 60/300/600s 退避并触发 bucket cooldown，
+        避免限速期间继续空打 B站。
+        """
         last_err = None
         for attempt in range(api_max_attempts):
             try:
                 return fn()
             except Exception as e:
                 last_err = e
+                is_rl = _is_rate_limited(e)
+                ds = rate_limit_delays if is_rl else delays
+                max_a = rate_limit_max_attempts if is_rl else api_max_attempts
                 if queue is not None:
                     queue.increment_retry(job["id"])
-                if attempt < api_max_attempts - 1:
+                if attempt < max_a - 1:
+                    next_sleep = ds[min(attempt, len(ds) - 1)]
                     log.warn(
-                        f"{step_name} 失败（第 {attempt + 1}/{api_max_attempts} 次）",
+                        f"{step_name} 失败（第 {attempt + 1}/{max_a} 次）"
+                        + ("（B站限速，延长退避）" if is_rl else ""),
                         step=step_name,
-                        extra={"error": str(e), "next_sleep": delays[attempt]},
+                        extra={
+                            "error": str(e),
+                            "next_sleep": next_sleep,
+                            "rate_limited": is_rl,
+                        },
                     )
-                    time.sleep(delays[attempt])
+                    if is_rl:
+                        from b2text.ratelimit import _BILI_BUCKET
+                        _BILI_BUCKET.cooldown(next_sleep)
+                    time.sleep(next_sleep)
+                else:
+                    if is_rl:
+                        # 最后一次也失败：bucket 留个长尾，避免下一个任务立刻重蹈覆辙
+                        from b2text.ratelimit import _BILI_BUCKET
+                        _BILI_BUCKET.cooldown(60)
         raise last_err
 
     def fanout(job, log):
@@ -145,7 +173,8 @@ def build_default_steps(*, cookie: str, transcriber, queue: JobQueue | None = No
         from b2text.upmaster import fetch_up_videos
         uid = int(job["target_id"])
         limit = job.get("limit_n") or 50
-        log.set(uid=uid, limit=limit)
+        skip_existing = bool(job.get("skip_existing"))
+        log.set(uid=uid, limit=limit, skip_existing=skip_existing)
         if queue is None:
             raise RuntimeError("fanout 需要 queue（type=up 任务创建子任务）")
         bvids = _with_api_retry(
@@ -154,11 +183,17 @@ def build_default_steps(*, cookie: str, transcriber, queue: JobQueue | None = No
         )
         if not bvids:
             raise RuntimeError(f"upmaster 没拉到任何视频：uid={uid}")
+        enqueued = 0
+        skipped = 0
         for bvid in bvids:
+            if skip_existing and output_path_for_bvid(job["output_dir"], bvid).exists():
+                skipped += 1
+                continue
             queue.enqueue(
                 type="bv", target_id=bvid, output_dir=job["output_dir"], parent_id=job["id"],
             )
-        log.set(child_count=len(bvids))
+            enqueued += 1
+        log.set(child_count=enqueued, skipped_existing=skipped)
 
     def get_video_info(job, log):
         if job["type"] != "bv":
@@ -175,17 +210,18 @@ def build_default_steps(*, cookie: str, transcriber, queue: JobQueue | None = No
             return
         info = job["_video_info"]
         cid = info["pages"][0]["cid"]
-        url = _with_api_retry(log, job, "get_audio_url",
-                               lambda: _bili_api.get_audio_url(info["aid"], cid, cookie=cookie))
-        if not url:
+        urls = _with_api_retry(log, job, "get_audio_url",
+                               lambda: _bili_api.get_audio_urls(info["aid"], cid, cookie=cookie))
+        if not urls:
             raise RuntimeError("get_audio_url failed")
-        job["_audio_url"] = url
+        job["_audio_urls"] = urls
+        log.set(url_count=len(urls))
 
     def download_audio(job, log):
         if job["type"] != "bv":
             return
         m4s = job["_tmpdir"] / "audio.m4s"
-        _audio.download_audio_stream(job["_audio_url"], m4s, cookie=cookie)
+        _audio.download_audio_stream_candidates(job["_audio_urls"], m4s, cookie=cookie)
         job["_audio_path"] = m4s
 
     def convert_wav(job, log):
@@ -205,7 +241,13 @@ def build_default_steps(*, cookie: str, transcriber, queue: JobQueue | None = No
     def transcribe(job, log):
         if job["type"] != "bv":
             return
-        log.set(device="mps", chunk_index=0, chunk_count=1)
+        device = getattr(transcriber, "device", "mps")
+        if not isinstance(device, str):
+            device = "mps"
+        log.set(
+            device=device,
+            chunk_index=0, chunk_count=1,
+        )
         raw = transcriber.transcribe(job["_wav_path"])
         job["_raw_segments"] = raw or []
         log.set(segment_count=len(job["_raw_segments"]))
@@ -214,9 +256,13 @@ def build_default_steps(*, cookie: str, transcriber, queue: JobQueue | None = No
         if job["type"] != "bv":
             return
         segs = normalize_funasr_output(job["_raw_segments"])
+        if queue is not None:
+            queue.save_segments(job["id"], [
+                {"start": s.start, "end": s.end, "speaker": s.speaker, "text": s.text}
+                for s in segs
+            ])
         text = format_segments(segs)
-        safe = re.sub(r'[<>:"/\\|?*]', "_", job["target_id"])[:80]
-        out_path = Path(job["output_dir"]) / f"{safe}.txt"
+        out_path = output_path_for_bvid(job["output_dir"], job["target_id"])
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(text, encoding="utf-8")
         log.set(segment_count=len(segs), output_path=str(out_path))

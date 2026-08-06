@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="options.css" />
+    <title>b2text 设置</title>
+    <script src="options.js" defer></script>
+  </head>
+  <body>
+    <main>
+      <h1>b2text 设置</h1>
+
+      <section>
+        <h2>后端</h2>
+        <label for="backendUrl">本地后端地址</label>
+        <input id="backendUrl" type="text" spellcheck="false" />
+        <p class="hint">
+          默认 <code>http://127.0.0.1:8765</code>。先运行
+          <code>b2text serve start</code>。若指向远程机器，需后端支持
+          HTTPS/CORS 且 Chrome 已授予对应 host 权限。
+        </p>
+      </section>
+
+      <section>
+        <h2>转写文字层</h2>
+        <label class="checkbox">
+          <input id="showTranscript" type="checkbox" />
+          默认显示转写文字
+        </label>
+        <label for="fontSize">字号</label>
+        <input id="fontSize" type="number" min="10" max="32" />
+        <p class="hint">也可以在播放页面板上按 A− / A+ 直接调整。</p>
+      </section>
+
+      <section>
+        <h2>遮挡层</h2>
+        <label class="checkbox">
+          <input id="overlayEnabled" type="checkbox" />
+          默认显示遮挡层
+        </label>
+        <label for="overlayColor">颜色</label>
+        <div class="color-row">
+          <input id="overlayColor" type="color" />
+          <span class="swatches">
+            <button type="button" data-color="#000000" class="swatch"></button>
+            <button type="button" data-color="#ffffff" class="swatch"></button>
+            <button type="button" data-color="#ff5252" class="swatch"></button>
+            <button type="button" data-color="#448aff" class="swatch"></button>
+            <button type="button" data-color="#69f0ae" class="swatch"></button>
+          </span>
+        </div>
+        <label for="overlayOpacity">不透明度（<span id="opacityValue">0.8</span>）</label>
+        <input id="overlayOpacity" type="range" min="0.1" max="1" step="0.05" />
+        <p class="hint">
+          遮挡层默认只遮挡视频底部字幕区；按住遮挡条任意位置拖动可移动，
+          右下角手柄可调整大小（底边固定）。
+        </p>
+      </section>
+
+      <section>
+        <h2>快捷键</h2>
+        <ul class="shortcuts">
+          <li><code>Ctrl/^ + Shift + →</code> 下一句</li>
+          <li><code>Ctrl/^ + Shift + ←</code> 上一句</li>
+          <li><code>Ctrl/^ + Shift + T</code> 显示/隐藏转写文字</li>
+          <li><code>Ctrl/^ + Shift + O</code> 显示/隐藏遮挡层</li>
+        </ul>
+        <p class="hint">
+          macOS 用 Control（^），Windows/Linux 用 Ctrl；不使用 Alt/Option
+          （macOS 上会输入特殊字符）。修改方式：
+          <code>chrome://extensions/shortcuts</code>
+        </p>
+      </section>
+
+      <div class="actions">
+        <button id="save">保存</button>
+        <span id="saved" class="saved"></span>
+      </div>
+    </main>
+  </body>
+</html>

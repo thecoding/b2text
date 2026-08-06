@@ -25,6 +25,67 @@ def test_enqueue_creates_job_with_queued_status(q):
     assert job["error"] is None
     assert job["started_at"] is None
     assert job["finished_at"] is None
+    assert job["skip_existing"] == 0  # 默认 False
+
+
+def test_enqueue_skip_existing_true_round_trips(q):
+    job_id = q.enqueue(
+        type="up", target_id="12345", output_dir="/tmp/out",
+        skip_existing=True,
+    )
+    assert q.get(job_id)["skip_existing"] == 1
+
+
+def test_skip_existing_column_present_after_init(q):
+    """新库应有 skip_existing 列；旧库构造后也能 ALTER 加上。"""
+    job_id = q.enqueue(type="up", target_id="1", output_dir="/tmp")
+    cols = {row[1] for row in q._conn.execute("PRAGMA table_info(jobs)").fetchall()}
+    assert "skip_existing" in cols
+
+
+def test_old_schema_with_added_column_round_trips(tmp_path):
+    """回归：模拟老 DB（ALTER TABLE 把 skip_existing 加在末尾）→ 新代码 INSERT/读取不出错。
+
+    列序：id, type, target_id, output_dir, limit_n, status, parent_id, result_path,
+          error, created_at, started_at, finished_at, retry_count, skip_existing
+    之前的 bug：INSERT 用 VALUES (?,?,...) 假设 skip_existing 在第 6 位，结果
+    created_at 落到 retry_count 上 → NOT NULL constraint failed。
+    """
+    import sqlite3
+    db = tmp_path / "legacy.db"
+    conn = sqlite3.connect(str(db), isolation_level=None, check_same_thread=False)
+    # 故意建老 schema（13 列，没有 skip_existing）
+    conn.executescript("""
+        CREATE TABLE jobs (
+            id TEXT PRIMARY KEY, type TEXT NOT NULL, target_id TEXT NOT NULL,
+            output_dir TEXT NOT NULL, limit_n INTEGER, status TEXT NOT NULL,
+            parent_id TEXT, result_path TEXT, error TEXT,
+            created_at REAL NOT NULL, started_at REAL, finished_at REAL,
+            retry_count INTEGER DEFAULT 0
+        );
+    """)
+    conn.close()
+
+    queue = JobQueue(db)
+    try:
+        # enqueue 必须成功，且 created_at 不能为 NULL
+        job_id = queue.enqueue(
+            type="up", target_id="12345", output_dir="/tmp/out",
+            limit_n=10, skip_existing=True, parent_id="parent-1",
+        )
+        job = queue.get(job_id)
+        assert job is not None
+        assert job["id"] == job_id
+        assert job["type"] == "up"
+        assert job["target_id"] == "12345"
+        assert job["limit_n"] == 10
+        assert job["skip_existing"] == 1   # 不再依赖列序
+        assert job["status"] == JobStatus.QUEUED
+        assert job["parent_id"] == "parent-1"
+        assert job["created_at"] is not None
+        assert job["finished_at"] is None
+    finally:
+        queue.close()
 
 
 def test_enqueue_with_parent_id(q):
@@ -87,6 +148,77 @@ def test_list_filters_by_status(q):
     assert {r["id"] for r in rows} == {j1}
     rows = q.list(status=JobStatus.QUEUED)
     assert {r["id"] for r in rows} == {j2}
+
+
+def test_list_filters_by_multiple_statuses(q):
+    """statuses=[QUEUED, RUNNING] 应返回两种状态的并集。"""
+    j1 = q.enqueue(type="bv", target_id="BV1a", output_dir="/tmp/out")
+    j2 = q.enqueue(type="bv", target_id="BV1b", output_dir="/tmp/out")
+    j3 = q.enqueue(type="bv", target_id="BV1c", output_dir="/tmp/out")
+    j4 = q.enqueue(type="bv", target_id="BV1d", output_dir="/tmp/out")
+    q.claim_next()        # j1 → running
+    q.finish(j2, result_path="/tmp/out/b.txt")  # j2 → done
+    q.fail(j4, error="boom")                     # j4 → failed（j4 还 queued）
+
+    rows = q.list(statuses=[JobStatus.QUEUED, JobStatus.RUNNING])
+    assert {r["id"] for r in rows} == {j1, j3}
+
+    rows = q.list(statuses=[JobStatus.DONE, JobStatus.FAILED])
+    assert {r["id"] for r in rows} == {j2, j4}
+
+
+def test_list_statuses_in_descending_order(q):
+    """多状态过滤仍然按 created_at DESC 排序。"""
+    import time
+    ids = []
+    for i in range(3):
+        ids.append(q.enqueue(type="bv", target_id=f"BV{i}", output_dir="/tmp"))
+        time.sleep(0.01)
+    rows = q.list(statuses=[JobStatus.QUEUED])
+    assert [r["id"] for r in rows] == list(reversed(ids))
+
+
+def test_count_filters_by_multiple_statuses(q):
+    j1 = q.enqueue(type="bv", target_id="BV1a", output_dir="/tmp/out")
+    j2 = q.enqueue(type="bv", target_id="BV1b", output_dir="/tmp/out")
+    j3 = q.enqueue(type="bv", target_id="BV1c", output_dir="/tmp/out")
+    q.claim_next()  # j1 → running
+    q.finish(j2, result_path="/tmp/out/b.txt")
+    assert q.count(statuses=[JobStatus.QUEUED, JobStatus.RUNNING]) == 2
+    assert q.count(statuses=[JobStatus.QUEUED, JobStatus.DONE]) == 2
+    assert q.count(statuses=[JobStatus.DONE]) == 1
+    # 不传 statuses → 旧行为不变
+    assert q.count() == 3
+
+
+def test_save_and_get_segments_round_trip(q):
+    job_id = q.enqueue(type="bv", target_id="BV1seg", output_dir="/tmp/out")
+    q.save_segments(job_id, [
+        {"start": 0.0, "end": 1.0, "speaker": "Speaker_1", "text": "你好"},
+        {"start": 1.0, "end": 2.5, "speaker": "Speaker_2", "text": "世界"},
+    ])
+    assert q.get_segments(job_id) == [
+        {"start": 0.0, "end": 1.0, "speaker": "Speaker_1", "text": "你好"},
+        {"start": 1.0, "end": 2.5, "speaker": "Speaker_2", "text": "世界"},
+    ]
+
+
+def test_save_segments_overwrites_previous(q):
+    job_id = q.enqueue(type="bv", target_id="BV1seg", output_dir="/tmp/out")
+    q.save_segments(job_id, [{"start": 0.0, "end": 1.0, "speaker": "S1", "text": "旧"}])
+    q.save_segments(job_id, [{"start": 5.0, "end": 6.0, "speaker": "S1", "text": "新"}])
+    segs = q.get_segments(job_id)
+    assert len(segs) == 1
+    assert segs[0]["text"] == "新"
+
+
+def test_cleanup_removes_segments(q):
+    job_id = q.enqueue(type="bv", target_id="BV1seg", output_dir="/tmp/out")
+    q.fail(job_id, error="boom")
+    q.save_segments(job_id, [{"start": 0.0, "end": 1.0, "speaker": "S1", "text": "x"}])
+    q.cleanup(status=JobStatus.FAILED)
+    assert q.get(job_id) is None
+    assert q.get_segments(job_id) == []
 
 
 def test_recover_orphans_resets_running_to_queued(q):

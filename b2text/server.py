@@ -10,9 +10,11 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from b2text.paths import data_dir
 from b2text.queue import JobQueue, JobStatus
 
 
@@ -27,8 +29,10 @@ class AppContext:
 class TranscribeRequest(BaseModel):
     type: str = Field(..., pattern="^(bv|up)$")
     id: str = Field(..., min_length=1)
-    output_dir: str = Field(..., min_length=1)
-    limit: int | None = Field(None, ge=1, le=50)
+    output_dir: str | None = Field(None, min_length=1,
+                                   description="输出目录；不传时默认 data_dir/extension（扩展场景）")
+    limit: int | None = Field(None, ge=1, description="UP 任务最多拉取的视频数；超过 50 时自动翻页")
+    skip_existing: bool = Field(False, description="UP 任务跳过 output_dir 下已存在的 .txt")
 
 
 _BVID_RE = re.compile(r"^BV[a-zA-Z0-9]+$")
@@ -151,6 +155,14 @@ def build_app(ctx: AppContext) -> FastAPI:
 
     app = FastAPI(title="b2text daemon", lifespan=lifespan)
     app.state.ctx = ctx
+    # 本地 daemon 同时服务 Chrome 扩展等本地客户端；扩展 fetch 带 chrome-extension:// Origin，
+    # 用通配来源放行（只绑定 127.0.0.1，风险可控）。
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     @app.get("/health")
     def health(queue: JobQueue = Depends(get_queue)):
@@ -183,19 +195,29 @@ def build_app(ctx: AppContext) -> FastAPI:
                 detail["error"] = "model_load_failed"
                 detail["message"] = state["model_error"]
             raise HTTPException(503, detail=detail)
+        output_dir = req.output_dir or str(data_dir() / "extension")
         job_id = queue.enqueue(
             type=req.type,
             target_id=req.id,
-            output_dir=req.output_dir,
+            output_dir=output_dir,
             limit_n=req.limit,
+            skip_existing=req.skip_existing,
         )
         return {"task_id": job_id}
 
     @app.get("/tasks")
     def list_tasks(status: str | None = Query(None), limit: int = 50,
-                   offset: int = 0, queue: JobQueue = Depends(get_queue)):
-        st = JobStatus(status) if status else None
-        tasks = queue.list(status=st, limit=limit, offset=offset)
+                   offset: int = 0,
+                   uncompleted: bool = Query(False),
+                   queue: JobQueue = Depends(get_queue)):
+        if uncompleted:
+            statuses = [JobStatus.QUEUED, JobStatus.RUNNING]
+            tasks = queue.list(statuses=statuses, limit=limit, offset=offset)
+            total = queue.count(statuses=statuses)
+        else:
+            st = JobStatus(status) if status else None
+            tasks = queue.list(status=st, limit=limit, offset=offset)
+            total = queue.count(status=st)
         # 给每条任务附加"最后处理的 step + 状态（start/ok/fail/job_done）"，
         # 让 CLI 表格可以显示进度而不必单独 GET /tasks/{id}/log。
         progress_map = _current_steps_batch(ctx.log_path, [t["id"] for t in tasks])
@@ -203,7 +225,7 @@ def build_app(ctx: AppContext) -> FastAPI:
             t["progress"] = progress_map.get(t["id"])
         return {
             "tasks": tasks,
-            "total": queue.count(status=st),
+            "total": total,
         }
 
     @app.get("/tasks/{task_id}")
@@ -212,6 +234,25 @@ def build_app(ctx: AppContext) -> FastAPI:
         if job is None:
             raise HTTPException(404, detail="not found")
         return job
+
+    @app.get("/tasks/{task_id}/segments")
+    def get_task_segments(task_id: str, queue: JobQueue = Depends(get_queue)):
+        """返回任务转写时间线；任务未完成时返回 202 + 当前状态。"""
+        job = queue.get(task_id)
+        if job is None:
+            raise HTTPException(404, detail="not found")
+        if job["status"] != JobStatus.DONE.value:
+            return JSONResponse(
+                {"status": job["status"], "segments": [], "duration": 0.0},
+                status_code=202,
+            )
+        segments = queue.get_segments(task_id)
+        duration = max((s["end"] for s in segments), default=0.0)
+        return {
+            "status": job["status"],
+            "segments": segments,
+            "duration": duration,
+        }
 
     @app.get("/tasks/{task_id}/log")
     def get_task_log(task_id: str, queue: JobQueue = Depends(get_queue)):

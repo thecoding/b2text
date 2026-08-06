@@ -19,19 +19,20 @@ class JobStatus(str, Enum):
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
-    id           TEXT PRIMARY KEY,
-    type         TEXT NOT NULL,
-    target_id    TEXT NOT NULL,
-    output_dir   TEXT NOT NULL,
-    limit_n      INTEGER,
-    status       TEXT NOT NULL,
-    parent_id    TEXT,
-    result_path  TEXT,
-    error        TEXT,
-    created_at   REAL NOT NULL,
-    started_at   REAL,
-    finished_at  REAL,
-    retry_count  INTEGER DEFAULT 0
+    id            TEXT PRIMARY KEY,
+    type          TEXT NOT NULL,
+    target_id     TEXT NOT NULL,
+    output_dir    TEXT NOT NULL,
+    limit_n       INTEGER,
+    skip_existing INTEGER DEFAULT 0,
+    status        TEXT NOT NULL,
+    parent_id     TEXT,
+    result_path   TEXT,
+    error         TEXT,
+    created_at    REAL NOT NULL,
+    started_at    REAL,
+    finished_at   REAL,
+    retry_count   INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_status  ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_created ON jobs(created_at);
@@ -43,6 +44,17 @@ CREATE TABLE IF NOT EXISTS job_logs (
     PRIMARY KEY (job_id, seq)
 );
 CREATE INDEX IF NOT EXISTS idx_job_logs_job ON job_logs(job_id);
+
+CREATE TABLE IF NOT EXISTS job_segments (
+    job_id  TEXT NOT NULL,
+    seq     INTEGER NOT NULL,
+    start   REAL NOT NULL,
+    end     REAL NOT NULL,
+    speaker TEXT NOT NULL,
+    text    TEXT NOT NULL,
+    PRIMARY KEY (job_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_job_segments_job ON job_segments(job_id);
 """
 
 
@@ -57,7 +69,14 @@ class JobQueue:
         # 配合 WAL 模式，sqlite3 自身加锁保证多线程访问安全。
         self._conn = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
+        # row_factory=Row 让 SELECT * 返回支持列名索引的对象，
+        # 配合下面的命名 INSERT/SELECT，避免列序变化（如 ALTER TABLE ADD COLUMN 把列追加到末尾）造成错位。
+        self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
+        # 兼容老库：若 jobs 表还没 skip_existing 列，幂等加上。
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(jobs)").fetchall()}
+        if "skip_existing" not in cols:
+            self._conn.execute("ALTER TABLE jobs ADD COLUMN skip_existing INTEGER DEFAULT 0")
 
     def close(self) -> None:
         self._conn.close()
@@ -70,13 +89,18 @@ class JobQueue:
         target_id: str,
         output_dir: str,
         limit_n: int | None = None,
+        skip_existing: bool = False,
         parent_id: str | None = None,
     ) -> str:
         job_id = str(uuid.uuid4())
         now = time.time()
         self._conn.execute(
-            "INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO jobs "
+            "(id, type, target_id, output_dir, limit_n, skip_existing, status, "
+            " parent_id, result_path, error, created_at, started_at, finished_at, retry_count) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (job_id, type, target_id, output_dir, limit_n,
+             1 if skip_existing else 0,
              JobStatus.QUEUED.value, parent_id, None, None,
              now, None, None, 0),
         )
@@ -130,10 +154,20 @@ class JobQueue:
         self,
         *,
         status: JobStatus | None = None,
+        statuses: list[JobStatus] | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
-        if status is not None:
+        if statuses == []:
+            return []
+        if statuses is not None:
+            placeholders = ",".join("?" * len(statuses))
+            cur = self._conn.execute(
+                f"SELECT * FROM jobs WHERE status IN ({placeholders}) "
+                "ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (*[s.value for s in statuses], limit, offset),
+            )
+        elif status is not None:
             cur = self._conn.execute(
                 "SELECT * FROM jobs WHERE status=? ORDER BY created_at DESC LIMIT ? OFFSET ?",
                 (status.value, limit, offset),
@@ -173,6 +207,34 @@ class JobQueue:
         )
         return [r[0] for r in cur.fetchall()]
 
+    # ---------- 时间线（segments） ----------
+    def save_segments(self, job_id: str, segments: list[dict[str, Any]]) -> None:
+        """覆盖保存某任务的句子时间线（扩展/客户端拿结构化结果用）。"""
+        self._conn.execute(
+            "DELETE FROM job_segments WHERE job_id=?", (job_id,)
+        )
+        for i, seg in enumerate(segments):
+            self._conn.execute(
+                "INSERT INTO job_segments (job_id, seq, start, end, speaker, text) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    job_id, i,
+                    float(seg["start"]), float(seg["end"]),
+                    str(seg["speaker"]), str(seg["text"]),
+                ),
+            )
+
+    def get_segments(self, job_id: str) -> list[dict[str, Any]]:
+        cur = self._conn.execute(
+            "SELECT start, end, speaker, text FROM job_segments "
+            "WHERE job_id=? ORDER BY seq",
+            (job_id,),
+        )
+        return [
+            {"start": r[0], "end": r[1], "speaker": r[2], "text": r[3]}
+            for r in cur.fetchall()
+        ]
+
     # ---------- 重试 ----------
     def increment_retry(self, job_id: str) -> int:
         """retry_count += 1，返回新值。"""
@@ -197,8 +259,17 @@ class JobQueue:
         self,
         *,
         status: JobStatus | None = None,
+        statuses: list[JobStatus] | None = None,
     ) -> int:
-        if status is not None:
+        if statuses == []:
+            return 0
+        if statuses is not None:
+            placeholders = ",".join("?" * len(statuses))
+            cur = self._conn.execute(
+                f"SELECT COUNT(*) FROM jobs WHERE status IN ({placeholders})",
+                (*[s.value for s in statuses],),
+            )
+        elif status is not None:
             cur = self._conn.execute(
                 "SELECT COUNT(*) FROM jobs WHERE status=?", (status.value,)
             )
@@ -256,6 +327,11 @@ class JobQueue:
             f"DELETE FROM job_logs WHERE job_id IN ({_placeholders_for(len(target_ids))})",
             target_ids,
         )
+        # segments 与任务同生命周期
+        self._conn.execute(
+            f"DELETE FROM job_segments WHERE job_id IN ({_placeholders_for(len(target_ids))})",
+            target_ids,
+        )
 
         if cascade:
             # 把 parent_id IN (target_ids) 的 bv 子任务也加进来一起删
@@ -269,6 +345,10 @@ class JobQueue:
                     f"DELETE FROM job_logs WHERE job_id IN ({_placeholders_for(len(child_ids))})",
                     child_ids,
                 )
+                self._conn.execute(
+                    f"DELETE FROM job_segments WHERE job_id IN ({_placeholders_for(len(child_ids))})",
+                    child_ids,
+                )
                 target_ids.extend(child_ids)
 
         cur = self._conn.execute(
@@ -278,10 +358,6 @@ class JobQueue:
         return cur.rowcount
 
     # ---------- 内部 ----------
-    def _row_to_dict(self, row: sqlite3.Row | tuple) -> dict[str, Any]:
-        cols = (
-            "id", "type", "target_id", "output_dir", "limit_n", "status",
-            "parent_id", "result_path", "error",
-            "created_at", "started_at", "finished_at", "retry_count",
-        )
-        return dict(zip(cols, row))
+    def _row_to_dict(self, row: sqlite3.Row) -> dict[str, Any]:
+        """把 sqlite3.Row 转成 dict。靠 row_factory=Row 走列名访问，不再依赖列序。"""
+        return {key: row[key] for key in row.keys()}

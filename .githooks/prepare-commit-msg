@@ -1,0 +1,18 @@
+#!/usr/bin/env sh
+# prepare-commit-msg hook（可选）：设置 B2TEXT_LLM_COMMIT=1 时，
+# git commit 自动调用 scripts/gen-commit-message.sh 用 LLM 生成提交信息草稿。
+# 生成的是草稿，编辑器会打开供修改；不改直接保存也行（由 commit-msg 校验格式）。
+set -u
+
+msg_file="$1"
+[ -n "${B2TEXT_LLM_COMMIT:-}" ] || exit 0
+[ -s "$msg_file" ] && exit 0
+
+script="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)/scripts/gen-commit-message.sh"
+if [ -x "$script" ]; then
+  "$script" > "$msg_file" 2>/dev/null && {
+    echo "💡 已用 LLM 生成提交信息草稿（可直接编辑后保存）"
+  }
+fi
+
+exit 0

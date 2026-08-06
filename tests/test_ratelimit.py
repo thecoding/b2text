@@ -76,3 +76,51 @@ def test_thread_safety():
     assert elapsed >= 0.25, f"expected concurrent 8 acquires at 20/s to take >=0.3s, got {elapsed:.3f}s"
     # Sanity: timestamps should be monotonically non-decreasing
     assert timestamps == sorted(timestamps)
+
+
+def test_cooldown_forces_subsequent_acquires_to_wait():
+    """cooldown(seconds) 让后续 acquire 至少等指定秒数（用于 B站 -799 限速）。"""
+    bucket = TokenBucket(rate=1.0, capacity=3)
+    # 烧光 burst
+    for _ in range(3):
+        bucket.acquire()
+    # 触发 1.2s 冷却
+    bucket.cooldown(1.2)
+    t0 = time.monotonic()
+    bucket.acquire()
+    elapsed = time.monotonic() - t0
+    assert elapsed >= 1.1, f"cooldown(1.2) should make next acquire wait ~1.2s, got {elapsed:.3f}s"
+    assert elapsed < 1.6, f"cooldown shouldn't overshoot, got {elapsed:.3f}s"
+
+
+def test_cooldown_zero_is_noop():
+    bucket = TokenBucket(rate=1.0, capacity=2)
+    bucket.acquire()
+    bucket.cooldown(0)
+    # 不应该强制等待
+    t0 = time.monotonic()
+    bucket.acquire()
+    elapsed = time.monotonic() - t0
+    assert elapsed < 0.05, f"cooldown(0) should be no-op, took {elapsed:.3f}s"
+
+
+def test_cooldown_blocks_burst():
+    """cooldown 之后即使有 capacity 也不能 burst——必须等满 cooldown 时间。"""
+    bucket = TokenBucket(rate=1.0, capacity=10)
+    bucket.cooldown(0.8)
+    t0 = time.monotonic()
+    bucket.acquire()
+    elapsed = time.monotonic() - t0
+    # 不能 burst；必须等 cooldown 时间
+    assert 0.7 <= elapsed <= 1.1, f"cooldown should block burst; expected ~0.8s, got {elapsed:.3f}s"
+
+
+def test_cooldown_multiple_calls_use_latest():
+    """连续 cooldown 取最新一次的时间窗口。"""
+    bucket = TokenBucket(rate=1.0, capacity=2)
+    bucket.cooldown(0.3)
+    bucket.cooldown(1.0)  # 覆盖
+    t0 = time.monotonic()
+    bucket.acquire()
+    elapsed = time.monotonic() - t0
+    assert 0.9 <= elapsed <= 1.3, f"latest cooldown(1.0) should win, got {elapsed:.3f}s"

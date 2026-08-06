@@ -49,6 +49,20 @@ class TokenBucket:
                 wait = (1.0 - self.tokens) / self.rate
             time.sleep(wait)
 
+    def cooldown(self, seconds: float) -> None:
+        """强制后续 acquire 至少等 `seconds` 秒。
+
+        用于 B站 返回 -799（请求过于频繁）时拉黑整个 bucket 避免继续打 API。
+        实现：把 tokens 设为 1（等价于「下一秒就有一个 token 可用」）、last 推到
+        now+seconds。下次 acquire 会算出 elapsed = -seconds、tokens = 1 - seconds*rate，
+        wait = (1 - (1 - seconds*rate))/rate = seconds。
+        """
+        if seconds <= 0:
+            return
+        with self._lock:
+            self.tokens = 1.0
+            self.last = time.monotonic() + seconds
+
 
 # Shared bucket for all B站 API calls.
 # 1 req/sec steady-state; capacity 3 lets a fresh daemon burst three

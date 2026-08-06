@@ -99,3 +99,61 @@ def test_worker_up_job_finishes_without_result_path(env):
     # 子任务已入队
     children = [j for j in q.list() if j["parent_id"] == parent_id]
     assert len(children) == 2
+
+
+def test_fanout_skips_existing_files_when_flag_set(env, tmp_path):
+    """skip_existing=True 时，output_dir/<bvid>.txt 已存在的 bvid 不入队。"""
+    q, log_path, cookie = env
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    # 预先存在 BV1aaa 的产物
+    (out_dir / "BV1aaa.txt").write_text("already done")
+
+    # 用一个极简的 fanout：直接读 job 的 skip_existing，按 output_dir/<bvid>.txt 过滤
+    from b2text.output import output_path_for_bvid
+
+    def fake_fanout(job, log):
+        bvids = ["BV1aaa", "BV1bbb", "BV1ccc"]
+        skip = bool(job.get("skip_existing"))
+        enqueued = skipped = 0
+        for bvid in bvids:
+            if skip and output_path_for_bvid(job["output_dir"], bvid).exists():
+                skipped += 1
+                continue
+            q.enqueue(type="bv", target_id=bvid, output_dir=job["output_dir"], parent_id=job["id"])
+            enqueued += 1
+        log.set(child_count=enqueued, skipped_existing=skipped)
+
+    worker = _make_worker(q, log_path, cookie, steps={"fanout": fake_fanout})
+    parent_id = q.enqueue(
+        type="up", target_id="12345", output_dir=str(out_dir),
+        limit_n=3, skip_existing=True,
+    )
+    asyncio.run(worker.run_once())
+
+    children = [j for j in q.list() if j["parent_id"] == parent_id]
+    target_ids = sorted(c["target_id"] for c in children)
+    assert target_ids == ["BV1bbb", "BV1ccc"]  # BV1aaa 被跳过
+
+
+def test_fanout_does_not_skip_when_flag_false(env, tmp_path):
+    """skip_existing=False（默认）时，即使产物已存在也照常入队。"""
+    q, log_path, cookie = env
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    (out_dir / "BV1aaa.txt").write_text("already done")
+
+    def fake_fanout(job, log):
+        for bvid in ["BV1aaa", "BV1bbb"]:
+            q.enqueue(type="bv", target_id=bvid, output_dir=job["output_dir"], parent_id=job["id"])
+        log.set(child_count=2, skipped_existing=0)
+
+    worker = _make_worker(q, log_path, cookie, steps={"fanout": fake_fanout})
+    parent_id = q.enqueue(
+        type="up", target_id="12345", output_dir=str(out_dir), limit_n=2,
+    )
+    asyncio.run(worker.run_once())
+
+    children = [j for j in q.list() if j["parent_id"] == parent_id]
+    target_ids = sorted(c["target_id"] for c in children)
+    assert target_ids == ["BV1aaa", "BV1bbb"]

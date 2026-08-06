@@ -1,0 +1,24 @@
+#!/usr/bin/env sh
+# commit-msg hook：校验 Conventional Commits 格式，不符合则拒绝提交。
+# 格式见 AGENTS.md「提交规范」。
+set -u
+
+msg_file="$1"
+subject="$(grep -v '^#' "$msg_file" | grep -v '^$' | head -n 1)"
+
+case "$subject" in
+  Merge*) exit 0 ;;
+  Revert*) exit 0 ;;
+esac
+
+pattern='^(feat|fix|docs|refactor|perf|test|chore|build|ci)(\([a-z0-9-]+\))?!?: .+'
+if ! printf '%s' "$subject" | grep -Eq "$pattern"; then
+  echo "❌ 提交信息不符合 Conventional Commits 规范"
+  echo "   格式: type(scope): subject"
+  echo "   type: feat|fix|docs|refactor|perf|test|chore|build|ci"
+  echo "   示例: feat(extension): 遮挡层支持颜色配置"
+  echo "   详见 AGENTS.md「提交规范」"
+  exit 1
+fi
+
+exit 0

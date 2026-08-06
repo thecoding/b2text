@@ -4,6 +4,8 @@ All functions take base_url; raise DaemonNotRunning when the daemon is down.
 """
 from __future__ import annotations
 
+from typing import Any
+
 import httpx
 
 
@@ -41,10 +43,16 @@ def submit_bv(base_url: str, bvid: str, output_dir: str) -> str:
     return r.json()["task_id"]
 
 
-def submit_up(base_url: str, uid: str, output_dir: str, limit: int = 50) -> str:
+def submit_up(
+    base_url: str, uid: str, output_dir: str,
+    limit: int = 50, *, skip_existing: bool = False,
+) -> str:
     r = httpx.post(
         f"{base_url}/transcribe",
-        json={"type": "up", "id": uid, "output_dir": output_dir, "limit": limit},
+        json={
+            "type": "up", "id": uid, "output_dir": output_dir,
+            "limit": limit, "skip_existing": skip_existing,
+        },
         timeout=10.0,
     )
     r.raise_for_status()
@@ -57,9 +65,14 @@ def get_task(base_url: str, task_id: str) -> dict:
     return r.json()
 
 
-def list_tasks(base_url: str, status: str | None = None) -> dict:
-    params = {"status": status} if status else None
-    r = httpx.get(f"{base_url}/tasks", params=params, timeout=10.0)
+def list_tasks(base_url: str, status: str | None = None,
+                *, uncompleted: bool = False) -> dict:
+    params: dict[str, Any] = {}
+    if status:
+        params["status"] = status
+    if uncompleted:
+        params["uncompleted"] = "true"
+    r = httpx.get(f"{base_url}/tasks", params=params or None, timeout=10.0)
     r.raise_for_status()
     return r.json()
 

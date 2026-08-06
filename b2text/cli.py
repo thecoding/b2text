@@ -7,7 +7,7 @@
   status <task_id>
   list
   cancel <task_id>
-  run <bvid> -o FILE    # 本地直跑，不走 daemon
+  run <BV号|URL|本地mp4/wav> -o FILE [--device cpu] [--spk-num N] [--batch]
 """
 from __future__ import annotations
 
@@ -27,6 +27,7 @@ from b2text.client import (
 )
 from b2text.cookie_store import MissingCookieError, resolve_cookie
 from b2text.paths import config_dir, data_dir, daemon_pid
+from b2text import __version__
 
 
 _BASE_URL = DEFAULT_BASE_URL
@@ -171,7 +172,10 @@ def _transcribe(args) -> int:
             return 1
     else:
         try:
-            tid = submit_up(_BASE_URL, args.id_or_uid, args.output, limit=args.limit)
+            tid = submit_up(
+                _BASE_URL, args.id_or_uid, args.output,
+                limit=args.limit, skip_existing=args.skip_existing,
+            )
         except (DaemonNotRunning, httpx.RequestError) as e:
             print(_daemon_unreachable_message(e), flush=True)
             return 1
@@ -218,7 +222,8 @@ def _status(args) -> int:
 
 def _list(args) -> int:
     try:
-        data = list_tasks(_BASE_URL, status=args.status)
+        data = list_tasks(_BASE_URL, status=args.status,
+                          uncompleted=args.uncompleted)
     except (DaemonNotRunning, httpx.RequestError) as e:
         print(_daemon_unreachable_message(e))
         return 1
@@ -331,57 +336,167 @@ def _clean(args) -> int:
     return 0
 
 
-def _run(args) -> int:
-    """本地直跑（不通过 daemon）。"""
-    from b2text.transcriber import FunASRTranscriber
-    from b2text.normalizer import normalize_funasr_output
-    from b2text.formatter import format_segments
-    from b2text.audio import check_ffmpeg, download_audio_stream, ensure_wav
+_LOCAL_SUFFIXES = (".mp4", ".wav", ".m4s")
+
+
+def _is_local_path(s: str) -> bool:
+    """判断是否是本地文件路径（不是 BV 号或 URL）。"""
+    return Path(s).exists() or s.lower().endswith(_LOCAL_SUFFIXES)
+
+
+def _safe_filename(title: str) -> str:
+    """清理文件名非法字符。"""
+    return re.sub(r'[<>:"/\\|?*]', "_", title)[:60]
+
+
+def _transcribe_one(
+    input_arg: str,
+    output: Path,
+    transcriber,
+    cookie: str,
+    *,
+    overwrite: bool,
+    keep_audio: bool,
+    explicit: tuple[int | None, int | None] | None = None,
+) -> bool:
+    """处理单个视频/本地文件，返回成功与否。
+
+    explicit=(aid, cid)：批量模式时由 extract_series_videos 提供，避免每集
+    都重新拉一次 video info（也避免误用第一分页的 cid）。
+    """
     from b2text import bili_api
+    from b2text.audio import download_audio_stream, ensure_wav
+    from b2text.formatter import format_segments
+    from b2text.normalizer import normalize_funasr_output
     from b2text.utils import extract_bvid
 
-    if not check_ffmpeg():
-        print("❌ 未找到 ffmpeg。请先安装：brew install ffmpeg")
-        return 3
+    if output.exists() and not overwrite:
+        print(f"⏭️  跳过已存在：{output}")
+        return True
 
-    transcriber = FunASRTranscriber(device=args.device)
-    output = Path(args.output)
-    try:
-        cookie = resolve_cookie()
-    except MissingCookieError as e:
-        print(f"❌ {e}")
-        return 4
-
+    import shutil
     import tempfile
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmpdir = Path(tmpdir)
-        bvid = extract_bvid(args.id_or_uid)
-        if not bvid:
-            print(f"❌ 无法识别输入：{args.id_or_uid}")
-            return 1
-        info = bili_api.get_video_info(bvid, cookie=cookie)
-        if not info:
-            print(f"❌ 获取视频信息失败：{bvid}")
-            return 1
-        print(f"📺 {info['title']}")
-        page = info["pages"][0]
-        url = bili_api.get_audio_url(info["aid"], page["cid"], cookie=cookie)
-        if not url:
-            print("❌ 获取音频链接失败")
-            return 1
-        m4s_path = tmpdir / "audio.m4s"
-        download_audio_stream(url, m4s_path, cookie=cookie)
-        wav_path = ensure_wav(m4s_path, tmpdir)
+    with tempfile.TemporaryDirectory() as tmpdir_str:
+        tmpdir = Path(tmpdir_str)
+        if _is_local_path(input_arg):
+            source = Path(input_arg)
+            print(f"📂 使用本地文件：{source}")
+            wav_path = ensure_wav(source, tmpdir)
+        else:
+            bvid = extract_bvid(input_arg)
+            if not bvid:
+                print(f"❌ 无法识别输入：{input_arg}")
+                return False
+            print(f"🔍 查询视频信息：{bvid}")
+            try:
+                info = bili_api.get_video_info(bvid, cookie=cookie)
+            except bili_api.BiliAPIError as e:
+                print(f"❌ 获取视频信息失败：{e}")
+                return False
+            if not info:
+                print(f"❌ 获取视频信息失败：{bvid}")
+                return False
+            print(f"📺 {info['title']}")
+            if explicit and explicit[1] is not None:
+                aid, cid = explicit
+            else:
+                aid, cid = info["aid"], info["pages"][0]["cid"]
+            try:
+                url = bili_api.get_audio_url(aid, cid, cookie=cookie)
+            except bili_api.BiliAPIError as e:
+                print(f"❌ 获取音频链接失败：{e}")
+                return False
+            if not url:
+                print("❌ 获取音频链接失败")
+                return False
+            m4s_path = tmpdir / "audio.m4s"
+            try:
+                download_audio_stream(url, m4s_path, cookie=cookie)
+            except RuntimeError as e:
+                print(f"❌ {e}")
+                return False
+            wav_path = ensure_wav(m4s_path, tmpdir)
 
         print("🎙️  开始转写…")
-        raw = transcriber.transcribe(wav_path)
+        try:
+            raw = transcriber.transcribe(wav_path)
+        except Exception as e:
+            print(f"❌ 转写失败：{e}")
+            return False
         segments = normalize_funasr_output(raw)
         text = format_segments(segments)
 
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(text, encoding="utf-8")
-        print(f"✅ 已写入 {output}（{len(segments)} 段）")
-    return 0
+        if keep_audio:
+            kept_wav = output.parent / f"{output.stem}.wav"
+            shutil.copy2(wav_path, kept_wav)
+            print(f"💾 已保留音频：{kept_wav}")
+
+    print(f"✅ 已写入 {output}（{len(segments)} 段）")
+    return True
+
+
+def _run(args) -> int:
+    """本地直跑（不通过 daemon）。"""
+    from b2text.transcriber import FunASRTranscriber
+    from b2text.audio import check_ffmpeg
+
+    if not check_ffmpeg():
+        print("❌ 未找到 ffmpeg。请先安装：brew install ffmpeg")
+        return 3
+
+    # 本地文件不需要 cookie；只有走 B 站 API 才要求。
+    if not args.batch and _is_local_path(args.id_or_uid):
+        cookie = ""
+    else:
+        try:
+            cookie = resolve_cookie()
+        except MissingCookieError as e:
+            print(f"❌ {e}")
+            return 4
+
+    transcriber = FunASRTranscriber(device=args.device, spk_num=args.spk_num)
+    output = Path(args.output)
+
+    if args.batch:
+        from b2text import bili_api
+        from b2text.utils import extract_bvid
+        bvid = extract_bvid(args.id_or_uid)
+        if not bvid:
+            print("❌ --batch 模式需要 BV 号或 URL")
+            return 1
+        try:
+            info = bili_api.get_video_info(bvid, cookie=cookie)
+        except bili_api.BiliAPIError as e:
+            print(f"❌ 获取视频信息失败：{e}")
+            return 1
+        if not info:
+            print(f"❌ 获取视频信息失败：{bvid}")
+            return 1
+        episodes = bili_api.extract_series_videos(info.get("ugc_season"))
+        if not episodes:
+            print(f"❌ {info['title']} 不是合集（无 ugc_season），无需 --batch")
+            return 1
+        output.mkdir(parents=True, exist_ok=True)
+        ok = True
+        for i, ep in enumerate(episodes, 1):
+            print(f"\n[{i}/{len(episodes)}] {ep['title']}")
+            out_file = output / f"{i:03d}_{_safe_filename(ep['title'])}.txt"
+            if not _transcribe_one(
+                ep["bvid"], out_file, transcriber, cookie,
+                overwrite=not args.no_overwrite,
+                keep_audio=args.keep_audio,
+                explicit=(ep.get("aid"), ep.get("cid")),
+            ):
+                ok = False
+        return 0 if ok else 1
+
+    return 0 if _transcribe_one(
+        args.id_or_uid, output, transcriber, cookie,
+        overwrite=not args.no_overwrite,
+        keep_audio=args.keep_audio,
+    ) else 1
 
 
 def JobStatus_str():
@@ -391,6 +506,7 @@ def JobStatus_str():
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="b2text")
+    p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = p.add_subparsers(dest="command", required=True)
 
     s = sub.add_parser("serve")
@@ -411,6 +527,8 @@ def build_parser() -> argparse.ArgumentParser:
     pt.add_argument("-o", "--output", required=True)
     pt.add_argument("--type", choices=["bv", "up"], default="bv")
     pt.add_argument("--limit", type=int, default=50)
+    pt.add_argument("--skip-existing", action="store_true",
+                    help="UP 任务跳过 output_dir 下已存在的 .txt，避免重复转写")
     pt.set_defaults(func=_transcribe)
 
     pst = sub.add_parser("status")
@@ -419,6 +537,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     pl = sub.add_parser("list")
     pl.add_argument("--status", choices=JobStatus_str(), default=None)
+    pl.add_argument("--uncompleted", action="store_true",
+                    help="只列出未完成的任务（queued + running）")
     pl.set_defaults(func=_list)
 
     pc = sub.add_parser("cancel")
@@ -442,6 +562,14 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("id_or_uid")
     pr.add_argument("-o", "--output", required=True)
     pr.add_argument("--device", default="mps", choices=["mps", "cpu"])
+    pr.add_argument("--spk-num", type=int, default=None,
+                    help="已知说话人数量（不指定则自动检测）")
+    pr.add_argument("--no-overwrite", action="store_true",
+                    help="不覆盖已存在的输出文件")
+    pr.add_argument("--keep-audio", action="store_true",
+                    help="在输出目录保留 wav 文件，便于复现或调试")
+    pr.add_argument("--batch", action="store_true",
+                    help="批量模式：处理 ugc_season 合集所有视频，输出到 -o 目录")
     pr.set_defaults(func=_run)
     return p
 

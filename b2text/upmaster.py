@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import httpx
 
+from b2text.bili_api import _USER_AGENT
 from b2text.ratelimit import _BILI_BUCKET
+from b2text.wbi import sign_query
 
-_SPACE_API = "https://api.bilibili.com/x/space/arc/search"
+_SPACE_API = "https://api.bilibili.com/x/space/wbi/arc/search"
 
 
 class UpmasterAPIError(RuntimeError):
@@ -23,9 +25,13 @@ class UpmasterAPIError(RuntimeError):
 
 
 def fetch_up_videos(uid: int, limit: int, *, cookie: str) -> list[str]:
-    """调用 B 站 space/arc/search，返回最多 limit 条 bvid。
+    """调用 B 站 space/wbi/arc/search，返回最多 limit 条 bvid。
 
-    B 站单页上限 50 条；limit > 50 时自动翻页（pn=1, 2, ...）直到拿够或某页为空。
+    B 站有两个等价 endpoint：
+      - /x/space/arc/search（旧）：对 ps>=20 直接 -799，且 IP+账号冷却期长
+      - /x/space/wbi/arc/search（新）：要求 wbi 签名，ps=50 全开，长期稳定可用
+
+    我们用新版 + wbi 签名。单页最多 50 条；limit > 50 时自动翻页（pn=1, 2, ...）直到拿够或某页为空。
     每页 API 调用都会走 _BILI_BUCKET 限速（1 req/s）。
 
     参数：
@@ -41,7 +47,9 @@ def fetch_up_videos(uid: int, limit: int, *, cookie: str) -> list[str]:
         return []
     headers = {
         "Cookie": cookie,
-        "User-Agent": "Mozilla/5.0",
+        "User-Agent": _USER_AGENT,
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         "Referer": "https://space.bilibili.com/",
     }
     bvids: list[str] = []
@@ -50,7 +58,14 @@ def fetch_up_videos(uid: int, limit: int, *, cookie: str) -> list[str]:
     while len(bvids) < limit:
         ps = min(limit - len(bvids), 50)
         _BILI_BUCKET.acquire()
-        url = f"{_SPACE_API}?mid={uid}&ps={ps}&pn={pn}&order=pubdate"
+        # wbi 签名：B站 从 2023 起对 space/arc/search 强制要求 wts + w_rid，
+        # 不签名直接 -799。sign_query 内部会缓存 img/sub key。
+        signed = sign_query(
+            {"mid": str(uid), "ps": str(ps), "pn": str(pn), "order": "pubdate"},
+            cookie=cookie, ua=_USER_AGENT,
+        )
+        qs = "&".join(f"{k}={v}" for k, v in signed.items())
+        url = f"{_SPACE_API}?{qs}"
         try:
             with httpx.Client(timeout=20.0) as client:
                 r = client.get(url, headers=headers)
