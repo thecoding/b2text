@@ -179,6 +179,33 @@ class JobQueue:
             )
         return [self._row_to_dict(r) for r in cur.fetchall()]
 
+    # ---------- 重复检测 ----------
+    def find_inflight(
+        self, *, type: str, target_id: str, output_dir: str
+    ) -> dict[str, Any] | None:
+        """返回同参数下最新一条未完成任务（queued/running），供 API 提交去重。"""
+        cur = self._conn.execute(
+            "SELECT * FROM jobs WHERE type=? AND target_id=? AND output_dir=? "
+            "AND status IN (?, ?) ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (type, target_id, output_dir,
+             JobStatus.QUEUED.value, JobStatus.RUNNING.value),
+        )
+        row = cur.fetchone()
+        return self._row_to_dict(row) if row is not None else None
+
+    def find_latest_done(
+        self, *, type: str, target_id: str, output_dir: str
+    ) -> dict[str, Any] | None:
+        """返回同参数下最近一条成功任务（result_path 非空），供 API 提交去重。"""
+        cur = self._conn.execute(
+            "SELECT * FROM jobs WHERE type=? AND target_id=? AND output_dir=? "
+            "AND status=? AND result_path IS NOT NULL "
+            "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (type, target_id, output_dir, JobStatus.DONE.value),
+        )
+        row = cur.fetchone()
+        return self._row_to_dict(row) if row is not None else None
+
     # ---------- 恢复 ----------
     def recover_orphans(self) -> int:
         """把 status=running 的任务（daemon crash 残留）重置为 queued，返回数量。"""

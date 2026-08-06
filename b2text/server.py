@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from b2text.output import output_path_for_bvid
 from b2text.paths import data_dir
 from b2text.queue import JobQueue, JobStatus
 
@@ -33,6 +34,7 @@ class TranscribeRequest(BaseModel):
                                    description="输出目录；不传时默认 data_dir/extension（扩展场景）")
     limit: int | None = Field(None, ge=1, description="UP 任务最多拉取的视频数；超过 50 时自动翻页")
     skip_existing: bool = Field(False, description="UP 任务跳过 output_dir 下已存在的 .txt")
+    force: bool = Field(False, description="跳过重复检测，强制重新转写（仅对 bv 任务生效）")
 
 
 _BVID_RE = re.compile(r"^BV[a-zA-Z0-9]+$")
@@ -196,6 +198,26 @@ def build_app(ctx: AppContext) -> FastAPI:
                 detail["message"] = state["model_error"]
             raise HTTPException(503, detail=detail)
         output_dir = req.output_dir or str(data_dir() / "extension")
+        if req.type == "bv" and not req.force:
+            # 重复检测：进行中/已成功/结果文件已存在时直接复用，避免重复解析。
+            inflight = queue.find_inflight(
+                type="bv", target_id=req.id, output_dir=output_dir
+            )
+            if inflight is not None:
+                return {"task_id": inflight["id"], "skipped": True,
+                        "reason": "in_progress"}
+            done = queue.find_latest_done(
+                type="bv", target_id=req.id, output_dir=output_dir
+            )
+            if done is not None and done["result_path"] \
+                    and Path(done["result_path"]).exists():
+                return {"task_id": done["id"], "skipped": True,
+                        "reason": "already_exists",
+                        "result_path": done["result_path"]}
+            out_path = output_path_for_bvid(output_dir, req.id)
+            if out_path.exists():
+                return {"task_id": None, "skipped": True,
+                        "reason": "file_exists", "result_path": str(out_path)}
         job_id = queue.enqueue(
             type=req.type,
             target_id=req.id,
@@ -203,7 +225,7 @@ def build_app(ctx: AppContext) -> FastAPI:
             limit_n=req.limit,
             skip_existing=req.skip_existing,
         )
-        return {"task_id": job_id}
+        return {"task_id": job_id, "skipped": False}
 
     @app.get("/tasks")
     def list_tasks(status: str | None = Query(None), limit: int = 50,

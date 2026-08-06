@@ -163,13 +163,29 @@ def _transcribe(args) -> int:
     if args.type == "bv":
         bvid = _normalize_bv(args.id_or_uid)
         try:
-            tid = submit_bv(_BASE_URL, bvid, args.output)
+            resp = submit_bv(_BASE_URL, bvid, args.output, force=args.force)
         except (DaemonNotRunning, httpx.RequestError) as e:
             print(_daemon_unreachable_message(e), flush=True)
             return 1
         except Exception as e:
             print(f"❌ 提交失败：{e}", flush=True)
             return 1
+        if resp.get("skipped"):
+            if resp.get("reason") == "in_progress":
+                print(f"⏳ 任务已在排队/运行中，复用任务：{resp['task_id']}", flush=True)
+            elif not resp.get("task_id"):
+                print(f"⏭️  已存在解析结果：{resp.get('result_path')}", flush=True)
+                print("    如需重新解析请加 --force", flush=True)
+            else:
+                print(f"⏭️  已解析过，复用任务：{resp['task_id']}", flush=True)
+                if resp.get("result_path"):
+                    print(f"    result: {resp['result_path']}", flush=True)
+                print("    如需重新解析请加 --force", flush=True)
+            return 0
+        tid = resp["task_id"]
+        print(f"✅ 任务已提交：{tid}")
+        print(f"   查状态：b2text status {tid}")
+        return 0
     else:
         try:
             tid = submit_up(
@@ -182,9 +198,9 @@ def _transcribe(args) -> int:
         except Exception as e:
             print(f"❌ 提交失败：{e}", flush=True)
             return 1
-    print(f"✅ 任务已提交：{tid}")
-    print(f"   查状态：b2text status {tid}")
-    return 0
+        print(f"✅ 任务已提交：{tid}")
+        print(f"   查状态：b2text status {tid}")
+        return 0
 
 
 _BV_RE = re.compile(r"(BV[a-zA-Z0-9]+)")
@@ -529,6 +545,8 @@ def build_parser() -> argparse.ArgumentParser:
     pt.add_argument("--limit", type=int, default=50)
     pt.add_argument("--skip-existing", action="store_true",
                     help="UP 任务跳过 output_dir 下已存在的 .txt，避免重复转写")
+    pt.add_argument("--force", action="store_true",
+                    help="跳过重复检测，强制重新解析（仅对 bv 任务生效）")
     pt.set_defaults(func=_transcribe)
 
     pst = sub.add_parser("status")

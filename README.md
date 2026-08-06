@@ -245,6 +245,10 @@ b2text transcribe --type up 12345678 -o /Users/me/sourceRead/ --limit 100
 # 跳过已转写过的视频（output_dir 下已有同名 .txt 就跳过，避免重复）
 b2text transcribe --type up 12345678 -o /Users/me/sourceRead/ --limit 100 --skip-existing
 
+# 单个 BV 默认带重复检测：同一视频已排队/运行中或已有成功结果时直接复用，
+# 不重复下载转写；需要强制重新解析时加 --force
+b2text transcribe BV1xxxxxxxxx -o /Users/me/sourceRead/ --force
+
 # 查状态
 b2text status <task_id>
 b2text list

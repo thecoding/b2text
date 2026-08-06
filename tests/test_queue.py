@@ -191,6 +191,40 @@ def test_count_filters_by_multiple_statuses(q):
     assert q.count() == 3
 
 
+def test_find_inflight_returns_queued_or_running_only(q):
+    j1 = q.enqueue(type="bv", target_id="BV1x", output_dir="/tmp/out")
+    j2 = q.enqueue(type="bv", target_id="BV1x", output_dir="/tmp/out")
+    claimed = q.claim_next()
+    assert claimed["id"] in (j1, j2)
+    found = q.find_inflight(type="bv", target_id="BV1x", output_dir="/tmp/out")
+    assert found is not None
+    assert found["id"] in (j1, j2)
+    assert found["status"] in (JobStatus.QUEUED, JobStatus.RUNNING)
+    # 参数不匹配时不命中
+    assert q.find_inflight(type="bv", target_id="BV1y", output_dir="/tmp/out") is None
+    assert q.find_inflight(type="bv", target_id="BV1x", output_dir="/tmp/other") is None
+    # 两条都完成后不再算 inflight
+    q.finish(j1, result_path="/tmp/out/a.txt")
+    q.finish(j2, result_path="/tmp/out/b.txt")
+    assert q.find_inflight(type="bv", target_id="BV1x", output_dir="/tmp/out") is None
+
+
+def test_find_latest_done_requires_result_path(q):
+    a = q.enqueue(type="bv", target_id="BV1x", output_dir="/tmp/out")
+    b = q.enqueue(type="bv", target_id="BV1x", output_dir="/tmp/out")
+    q.finish(a, result_path="/tmp/out/a.txt")
+    q.finish(b)  # result_path 为空：不算有效成功结果
+    found = q.find_latest_done(type="bv", target_id="BV1x", output_dir="/tmp/out")
+    assert found["id"] == a
+    q.finish(b, result_path="/tmp/out/b.txt")
+    assert q.find_latest_done(
+        type="bv", target_id="BV1x", output_dir="/tmp/out"
+    )["id"] == b
+    assert q.find_latest_done(
+        type="bv", target_id="BV1x", output_dir="/tmp/other"
+    ) is None
+
+
 def test_save_and_get_segments_round_trip(q):
     job_id = q.enqueue(type="bv", target_id="BV1seg", output_dir="/tmp/out")
     q.save_segments(job_id, [

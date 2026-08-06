@@ -51,12 +51,12 @@ async function requestJson(url, options = {}, timeoutMs = 15000) {
   }
 }
 
-async function submitTranscription(bvid) {
+async function submitTranscription(bvid, force = false) {
   const { backendUrl } = await getSettings();
   return requestJson(`${normBase(backendUrl)}/transcribe`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ type: "bv", id: bvid, output_dir: null }),
+    body: JSON.stringify({ type: "bv", id: bvid, output_dir: null, force }),
   });
 }
 
@@ -105,7 +105,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             sendResponse({ ok: true, taskId: task.taskId, reused: true });
             return;
           }
-          const body = await submitTranscription(msg.bvid);
+          const body = await submitTranscription(msg.bvid, !!msg.force);
+          if (!body.task_id) {
+            // 结果文件已存在但库里没有对应任务：无需再解析
+            sendResponse({ ok: true, reused: true });
+            return;
+          }
           task = { taskId: body.task_id, bvid: msg.bvid, status: "queued" };
           await setCachedTask(tabId, task);
           sendResponse({ ok: true, taskId: task.taskId, reused: false });
@@ -127,6 +132,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           ) {
             // 失败/取消的旧任务不复用：页面重开或重试时自动重新解析
             const body = await submitTranscription(msg.bvid);
+            if (!body.task_id) {
+              // 已有结果文件（无任务记录）：直接按完成处理
+              sendResponse({ state: "done", segments: [], duration: 0 });
+              return;
+            }
             task = { taskId: body.task_id, bvid: msg.bvid, status: "queued" };
             await setCachedTask(tabId, task);
             sendResponse({ state: "pending", taskId: task.taskId });

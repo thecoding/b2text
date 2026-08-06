@@ -95,6 +95,15 @@ class TestBuildParser:
         ])
         assert args.skip_existing is True
 
+    def test_transcribe_bv_force(self):
+        """--force 解析为 True，用于跳过服务端重复检测。"""
+        p = build_parser()
+        args = p.parse_args([
+            "transcribe", "BV1xxx", "-o", "/tmp/out", "--force",
+        ])
+        assert args.force is True
+        assert args.type == "bv"
+
     def test_status(self):
         p = build_parser()
         args = p.parse_args(["status", "abc-123"])

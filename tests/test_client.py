@@ -24,15 +24,17 @@ def test_submit_bv_posts_bv_payload(monkeypatch):
         class Resp:
             status_code = 200
             def json(self):
-                return {"task_id": "abc"}
+                return {"task_id": "abc", "skipped": False}
             def raise_for_status(self):
                 pass
         return Resp()
     monkeypatch.setattr("httpx.post", fake_post)
-    task_id = submit_bv("http://127.0.0.1:8765", "BV1xxx", "/tmp/out")
-    assert task_id == "abc"
+    resp = submit_bv("http://127.0.0.1:8765", "BV1xxx", "/tmp/out", force=True)
+    assert resp["task_id"] == "abc"
+    assert resp["skipped"] is False
     assert posted["json"]["type"] == "bv"
     assert posted["json"]["id"] == "BV1xxx"
+    assert posted["json"]["force"] is True
 
 
 def test_submit_up_posts_up_payload(monkeypatch):

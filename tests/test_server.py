@@ -36,6 +36,126 @@ def test_post_transcribe_returns_task_id(app):
     body = r.json()
     assert "task_id" in body
     assert len(body["task_id"]) > 0
+    assert body["skipped"] is False
+
+
+def test_transcribe_dedup_inflight(app):
+    """同一 BV 已排队/运行中时，再次提交复用原任务，不重复入队。"""
+    from b2text.queue import JobQueue, JobStatus
+    r1 = app.post("/transcribe", json={
+        "type": "bv", "id": "BV1dup", "output_dir": "/tmp/out"
+    })
+    r2 = app.post("/transcribe", json={
+        "type": "bv", "id": "BV1dup", "output_dir": "/tmp/out"
+    })
+    b1, b2 = r1.json(), r2.json()
+    assert b1["task_id"] == b2["task_id"]
+    assert b2["skipped"] is True
+    assert b2["reason"] == "in_progress"
+    q = JobQueue(app.app.state.ctx.db_path)
+    try:
+        assert q.count(status=JobStatus.QUEUED) == 1
+    finally:
+        q.close()
+
+
+def test_transcribe_dedup_done_with_existing_file(app, tmp_path):
+    """任务已成功且结果文件仍在时，再次提交复用原任务。"""
+    from b2text.queue import JobQueue
+    out = tmp_path / "out"
+    out.mkdir()
+    r1 = app.post("/transcribe", json={
+        "type": "bv", "id": "BV1dup", "output_dir": str(out)
+    })
+    task_id = r1.json()["task_id"]
+    result = out / "BV1dup.txt"
+    result.write_text("hello", encoding="utf-8")
+    q = JobQueue(app.app.state.ctx.db_path)
+    try:
+        q.claim_next()
+        q.finish(task_id, result_path=str(result))
+    finally:
+        q.close()
+
+    r2 = app.post("/transcribe", json={
+        "type": "bv", "id": "BV1dup", "output_dir": str(out)
+    })
+    body = r2.json()
+    assert body["skipped"] is True
+    assert body["reason"] == "already_exists"
+    assert body["task_id"] == task_id
+    assert body["result_path"] == str(result)
+
+
+def test_transcribe_reruns_when_result_file_deleted(app, tmp_path):
+    """结果文件被删后再次提交应重新解析（不复用 done 记录）。"""
+    from b2text.queue import JobQueue
+    out = tmp_path / "out"
+    out.mkdir()
+    r1 = app.post("/transcribe", json={
+        "type": "bv", "id": "BV1gone", "output_dir": str(out)
+    })
+    task_id = r1.json()["task_id"]
+    result = out / "BV1gone.txt"
+    result.write_text("old", encoding="utf-8")
+    q = JobQueue(app.app.state.ctx.db_path)
+    try:
+        q.claim_next()
+        q.finish(task_id, result_path=str(result))
+    finally:
+        q.close()
+    result.unlink()
+
+    r2 = app.post("/transcribe", json={
+        "type": "bv", "id": "BV1gone", "output_dir": str(out)
+    })
+    body = r2.json()
+    assert body["skipped"] is False
+    assert body["task_id"] != task_id
+
+
+def test_transcribe_dedup_bare_file_without_record(app, tmp_path):
+    """输出文件已存在但没有任务记录时也跳过（task_id 为空，提示结果路径）。"""
+    out = tmp_path / "out"
+    out.mkdir()
+    result = out / "BV1bare.txt"
+    result.write_text("existing", encoding="utf-8")
+    r = app.post("/transcribe", json={
+        "type": "bv", "id": "BV1bare", "output_dir": str(out)
+    })
+    body = r.json()
+    assert body["skipped"] is True
+    assert body["reason"] == "file_exists"
+    assert body["task_id"] is None
+    assert body["result_path"] == str(result)
+
+
+def test_transcribe_force_bypasses_dedup(app, tmp_path):
+    """force=true 跳过重复检测，即使已有成功结果也重新入队。"""
+    from b2text.queue import JobQueue
+    out = tmp_path / "out"
+    out.mkdir()
+    r1 = app.post("/transcribe", json={
+        "type": "bv", "id": "BV1redo", "output_dir": str(out)
+    })
+    task_id = r1.json()["task_id"]
+    result = out / "BV1redo.txt"
+    result.write_text("old", encoding="utf-8")
+    q = JobQueue(app.app.state.ctx.db_path)
+    try:
+        q.claim_next()
+        q.finish(task_id, result_path=str(result))
+    finally:
+        q.close()
+
+    r2 = app.post("/transcribe", json={
+        "type": "bv", "id": "BV1redo", "output_dir": str(out),
+        "force": True,
+    })
+    body = r2.json()
+    assert body["skipped"] is False
+    assert body["task_id"] != task_id
+    assert app.get(f"/tasks/{body['task_id']}").json()["status"] == "queued"
 
 
 def test_post_transcribe_output_dir_defaults_to_data_dir(app):
@@ -265,7 +385,7 @@ def test_delete_tasks_by_status(app):
     """DELETE /tasks?status=failed 删除失败任务，body 返回 deleted 数。"""
     for _ in range(2):
         app.post("/transcribe", json={
-            "type": "bv", "id": "BV1xx", "output_dir": "/tmp/out"
+            "type": "bv", "id": f"BV1xx{_}", "output_dir": "/tmp/out"
         })
     # 标记两条为 failed
     from b2text.queue import JobQueue

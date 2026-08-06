@@ -33,14 +33,15 @@ class DaemonClient:
             raise DaemonNotRunning(f"daemon not running at {self.base_url}: {e}")
 
 
-def submit_bv(base_url: str, bvid: str, output_dir: str) -> str:
+def submit_bv(base_url: str, bvid: str, output_dir: str, *, force: bool = False) -> dict:
+    """提交 bv 转写任务，返回完整响应（含 task_id / skipped / reason）。"""
     r = httpx.post(
         f"{base_url}/transcribe",
-        json={"type": "bv", "id": bvid, "output_dir": output_dir},
+        json={"type": "bv", "id": bvid, "output_dir": output_dir, "force": force},
         timeout=10.0,
     )
     r.raise_for_status()
-    return r.json()["task_id"]
+    return r.json()
 
 
 def submit_up(
