@@ -1,12 +1,14 @@
 """音频下载、抽取与 WAV 转换。
 
-依赖系统命令：ffmpeg、curl
+依赖系统命令：ffmpeg；HTTP 下载使用 httpx。
 """
+from __future__ import annotations
+
 import subprocess
+import time
 from pathlib import Path
 
-# 占位符：请替换为你的真实 cookie。详见 README 故障排查。
-COOKIE = "YOUR_BILIBILI_COOKIE_HERE"
+import httpx
 
 
 def check_ffmpeg() -> bool:
@@ -39,23 +41,58 @@ def extract_audio_from_mp4(mp4_path: Path, wav_path: Path) -> Path:
     return wav_path
 
 
-def download_audio_stream(url: str, output: Path, cookie: str = COOKIE) -> Path:
-    """用 curl 下载音频流（m4s）。失败抛 RuntimeError。"""
-    cmd = [
-        "curl", "-L", "-C", "-",
-        "-o", str(output),
-        "-H", f"Cookie: {cookie}",
-        "-H", "Referer: https://www.bilibili.com",
-        "-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "--max-time", "600",
-        url,
-    ]
-    result = subprocess.run(cmd, capture_output=True)
-    if result.returncode != 0:
-        raise RuntimeError(f"音频下载失败 (exit {result.returncode})")
+def _download_audio_one(url: str, output: Path, *, cookie: str) -> None:
+    """下载单个 URL；HTTP/空文件失败抛 RuntimeError。"""
+    headers = {
+        "Cookie": cookie,
+        "Referer": "https://www.bilibili.com",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    }
+    try:
+        with httpx.Client(timeout=600.0, follow_redirects=True) as client:
+            r = client.get(url, headers=headers)
+            r.raise_for_status()
+            output.write_bytes(r.content)
+    except httpx.HTTPError as e:
+        raise RuntimeError(f"音频下载失败: {e}")
     if not output.exists() or output.stat().st_size == 0:
         raise RuntimeError(f"音频下载失败：文件为空或不存在 {output}")
+
+
+def download_audio_stream(url: str, output: Path, *, cookie: str) -> Path:
+    """用 httpx 下载单个音频流（m4s）。失败抛 RuntimeError。"""
+    _download_audio_one(url, output, cookie=cookie)
     return output
+
+
+def download_audio_stream_candidates(
+    urls: list[str],
+    output: Path,
+    *,
+    cookie: str,
+    attempts_per_url: int = 2,
+    gap_seconds: float = 1.0,
+) -> Path:
+    """按顺序尝试多个 CDN 地址（baseUrl + backupUrl），全部失败抛 RuntimeError。
+
+    B 站 playurl 返回的某个 CDN 节点（尤其 mcdn 的 http 直连地址）可能
+    503/超时；backupUrl 通常是 https 的 upos 节点，逐个回退可显著提高成功率。
+    """
+    if not urls:
+        raise RuntimeError("音频下载失败：没有可用的音频地址")
+    last_err: Exception | None = None
+    for url in urls:
+        for attempt in range(attempts_per_url):
+            try:
+                _download_audio_one(url, output, cookie=cookie)
+                return output
+            except RuntimeError as e:
+                last_err = e
+                if attempt < attempts_per_url - 1:
+                    time.sleep(gap_seconds)
+    raise RuntimeError(
+        f"音频下载失败（已尝试 {len(urls)} 个 CDN 地址、每个 {attempts_per_url} 次）: {last_err}"
+    )
 
 
 def ensure_wav(source: Path, output_dir: Path) -> Path:

@@ -1,0 +1,278 @@
+/* b2text extension — 转写文字层 / 遮挡层样式 */
+
+/* 转写面板：悬浮可拖拽 */
+.b2text-panel {
+  position: fixed;
+  top: 80px;
+  right: 16px;
+  z-index: 2147483647;
+  width: 360px;
+  max-width: min(90vw, 420px);
+  max-height: 60vh;
+  display: flex;
+  flex-direction: column;
+  background: rgba(20, 20, 24, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 10px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+  color: #eee;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  user-select: none;
+}
+
+.b2text-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  cursor: grab;
+}
+
+.b2text-panel-header:active {
+  cursor: grabbing;
+}
+
+.b2text-title {
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.b2text-status {
+  flex: 1;
+  font-size: 12px;
+  color: #9aa0aa;
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.b2text-panel-header button {
+  border: none;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.12);
+  color: #eee;
+  width: 26px;
+  height: 24px;
+  line-height: 1;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.b2text-panel-header button:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+/* 「开始解析」按钮需要容纳文字，不能沿用 26px 小按钮宽度 */
+.b2text-panel-header button[data-act="start"] {
+  width: auto;
+  padding: 0 10px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* 「循环」按钮需要容纳文字，沿用自动宽度；激活时高亮 */
+.b2text-panel-header button[data-act="loop"] {
+  width: auto;
+  padding: 0 8px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.b2text-panel-header button[data-act="loop"].on {
+  background: rgba(112, 190, 255, 0.4);
+  color: #fff;
+}
+
+/* 悬浮入口：对应层隐藏时出现，点击重新打开 */
+.b2text-launchers {
+  position: fixed;
+  top: 80px;
+  right: 16px;
+  z-index: 2147483647;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.b2text-launcher {
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+  background: rgba(20, 20, 24, 0.92);
+  color: #eee;
+  padding: 6px 12px;
+  font-size: 13px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+}
+
+.b2text-launcher:hover {
+  background: rgba(60, 60, 68, 0.95);
+}
+
+.b2text-lines {
+  overflow-y: auto;
+  padding: 6px 0;
+  font-size: 16px;
+  user-select: text;
+}
+
+/* 错误详情：完整显示，可复制 */
+.b2text-error {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 8px 12px;
+  border-top: 1px solid rgba(255, 138, 128, 0.35);
+  background: rgba(255, 138, 128, 0.08);
+}
+
+.b2text-error[hidden] {
+  display: none;
+}
+
+.b2text-error-text {
+  margin: 0;
+  flex: 1;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: #ff8a80;
+  font-size: 12px;
+  line-height: 1.5;
+  user-select: text;
+}
+
+.b2text-error button {
+  flex-shrink: 0;
+  border: none;
+  border-radius: 6px;
+  background: rgba(255, 138, 128, 0.25);
+  color: #ff8a80;
+  padding: 3px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.b2text-error button:hover {
+  background: rgba(255, 138, 128, 0.4);
+}
+
+.b2text-line {
+  display: flex;
+  gap: 8px;
+  padding: 5px 12px;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.b2text-check {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  margin: 3px 0 0;
+  accent-color: #70beff;
+  cursor: pointer;
+}
+
+.b2text-line:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.b2text-line.active {
+  background: rgba(230, 162, 60, 0.22);
+  border-left: 3px solid #f0a24b;
+  padding-left: 9px;
+}
+
+.b2text-line.selected {
+  background: rgba(112, 190, 255, 0.16);
+  border-left: 3px solid #70beff;
+  padding-left: 9px;
+}
+
+.b2text-time {
+  flex-shrink: 0;
+  color: #8f95a0;
+  font-variant-numeric: tabular-nums;
+  font-size: 0.85em;
+  padding-top: 1px;
+}
+
+.b2text-speaker {
+  flex-shrink: 0;
+  color: #7cc4ff;
+  font-size: 0.9em;
+}
+
+.b2text-text {
+  word-break: break-word;
+}
+
+/* 遮挡层：视频底部字幕遮挡条，可拖拽移动、可缩放 */
+.b2text-overlay {
+  position: absolute;
+  top: auto;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  height: 25%;
+  z-index: 2147483646;
+  background: #000;
+  opacity: 0.8;
+  cursor: move;
+}
+
+.b2text-overlay-toolbar {
+  position: absolute;
+  top: 6px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 12px;
+  cursor: move;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.b2text-overlay:hover .b2text-overlay-toolbar {
+  opacity: 1;
+}
+
+.b2text-overlay-toolbar button {
+  border: none;
+  background: transparent;
+  color: #fff;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.b2text-overlay-resize {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 18px;
+  height: 18px;
+  cursor: nwse-resize;
+}
+
+.b2text-overlay-resize::after {
+  content: "";
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  width: 10px;
+  height: 10px;
+  border-right: 2px solid rgba(255, 255, 255, 0.85);
+  border-bottom: 2px solid rgba(255, 255, 255, 0.85);
+}

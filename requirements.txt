@@ -1,5 +1,0 @@
-funasr>=1.1.0
-modelscope>=1.10.0
-torch>=2.0.0
-numpy
-pytest>=7.0

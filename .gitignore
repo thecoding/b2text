@@ -34,3 +34,8 @@ modelscope_cache/
 # Testing
 .coverage
 htmlcov/
+
+# Chrome 扩展打包产物
+chrome-extension/dist/
+*.crx
+*.pem

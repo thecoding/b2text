@@ -1,0 +1,54 @@
+{
+  "manifest_version": 3,
+  "name": "b2text 视频句子跳转",
+  "version": "0.1.0",
+  "description": "把当前 B 站视频发给本地 b2text 后端解析，用快捷键跳到上一句/下一句，可显示转写文字或遮挡层。",
+  "permissions": [
+    "storage",
+    "commands",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://www.bilibili.com/video/*",
+    "https://www.bilibili.com/list/*",
+    "http://127.0.0.1:8765/*",
+    "http://localhost:8765/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.bilibili.com/video/*",
+        "https://www.bilibili.com/list/*"
+      ],
+      "js": ["lib/seek.js", "lib/bvid.js", "lib/loop.js", "content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "b2text"
+  },
+  "options_page": "options/options.html",
+  "commands": {
+    "next-sentence": {
+      "suggested_key": { "default": "Ctrl+Shift+Right", "mac": "MacCtrl+Shift+Right" },
+      "description": "跳转到下一句"
+    },
+    "prev-sentence": {
+      "suggested_key": { "default": "Ctrl+Shift+Left", "mac": "MacCtrl+Shift+Left" },
+      "description": "跳转到上一句"
+    },
+    "toggle-transcript": {
+      "suggested_key": { "default": "Ctrl+Shift+T", "mac": "MacCtrl+Shift+T" },
+      "description": "显示/隐藏转写文字"
+    },
+    "toggle-overlay": {
+      "suggested_key": { "default": "Ctrl+Shift+O", "mac": "MacCtrl+Shift+O" },
+      "description": "显示/隐藏遮挡层"
+    }
+  }
+}

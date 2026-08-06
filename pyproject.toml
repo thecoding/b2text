@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "b2text"
+version = "0.2.0"
+description = "B站视频对话转文本（daemon + CLI）"
+requires-python = ">=3.10"
+ dependencies = [
+     "fastapi>=0.110.0",
+     "uvicorn[standard]>=0.27.0",
+     "httpx>=0.26.0",
+     "funasr>=1.1.0",
+     "modelscope>=1.10.0",
+     "torch>=2.0.0",
+     "numpy",
+ ]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+b2text = "b2text.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["b2text*"]
