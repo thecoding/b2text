@@ -61,6 +61,10 @@ background service worker
 
 macOS 用 Control（^）+ Shift；不使用 Alt/Option（会输入特殊字符）。
 
+循环播放选中句的快捷键 `Ctrl/^+Shift+L` 由 content script 内按键监听实现
+（Chrome 限制单个扩展最多 4 个 `chrome.commands` 默认快捷键，选句循环
+不占用该配额）。
+
 跳句逻辑：`segments` 按 `start` 排序，二分查找当前 `currentTime` 的位置；
 下一句 = 当前句的下一句；上一句 = 上一句的句首（在句子里按一次即跳到
 上一句；在句子间隙则回到最近一句的句首）。
@@ -90,6 +94,8 @@ macOS 用 Control（^）+ Shift；不使用 Alt/Option（会输入特殊字符�
 - [x] 后端：CORS + `job_segments` 持久化 + `GET /tasks/{id}/segments`
 - [x] background：提交 / 轮询 / 时间线缓存 / 命令转发
 - [x] content script：bvid 检测、跳句、文字层（拖拽/字号）、遮挡层（拖拽/缩放/颜色）
+- [x] 选句循环播放：勾选一句/多句 + 「循环」开关，句尾自动跳下一选中句，
+  最后一句结束回到第一句（含单测）
 - [x] popup / options UI
 - [x] 测试：后端单测 + `node --test` seek 逻辑
 

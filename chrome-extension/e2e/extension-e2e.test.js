@@ -8,7 +8,8 @@
 //   2. 打开扩展设置页，把后端地址指向本地 mock 服务
 //   3. 用路由拦截 bilibili.com，返回一个假播放页（含 <video>）
 //   4. 验证：自动提交解析 → 渲染时间线 → 快捷键/点击跳句 →
-//      文字层关闭与悬浮入口重开 → 遮挡层开关 → 失败场景完整错误展示
+//      选句循环播放 → 文字层关闭与悬浮入口重开 → 遮挡层开关 →
+//      失败场景完整错误展示
 "use strict";
 
 const { test } = require("node:test");
@@ -323,6 +324,47 @@ async function runE2E() {
       { timeout: 8000 }
     );
     assert.ok(Math.abs((await videoTime()) - 5) < 0.3);
+
+    // 3.5 选句循环播放：勾选两句 → 开循环 → 句尾跳下一句 → 最后一句回第一句
+    log("测试选句循环播放…");
+    const checkLine = (text) =>
+      page
+        .locator(".b2text-line", { hasText: text })
+        .locator("input.b2text-check")
+        .click();
+    await checkLine("大家好欢迎来到本期节目");
+    await checkLine("今天我们来聊一聊");
+    assert.equal(await page.locator(".b2text-line.selected").count(), 2);
+    await page.click('button[data-act="loop"]');
+    await page.waitForFunction(
+      () => document.querySelector('button[data-act="loop"]').classList.contains("on"),
+      null,
+      { timeout: 5000 }
+    );
+    const statusText = await page.locator(".b2text-status").textContent();
+    assert.ok(statusText.includes("循环中（2 句）"));
+
+    const fireTimeupdate = (t) =>
+      page.evaluate((time) => {
+        const v = document.querySelector("video");
+        v.currentTime = time;
+        v.dispatchEvent(new Event("timeupdate"));
+      }, t);
+    // 第一句（5~8s）结束后应跳到第二句（12s）
+    await fireTimeupdate(8.05);
+    await page.waitForFunction(
+      () => Math.abs(document.querySelector("video").currentTime - 12) < 0.3,
+      null,
+      { timeout: 8000 }
+    );
+    // 第二句（12~18s）结束后应回到第一句（5s）
+    await fireTimeupdate(18.05);
+    await page.waitForFunction(
+      () => Math.abs(document.querySelector("video").currentTime - 5) < 0.3,
+      null,
+      { timeout: 8000 }
+    );
+    log("选句循环播放通过");
 
     // 4. 遮挡层开关 + 悬浮入口重开
     log("测试遮挡层…");

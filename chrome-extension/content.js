@@ -7,11 +7,13 @@
 //   4. 快捷键跳句：上一句/下一句（<video>.currentTime）
 //   5. 渲染可拖拽、可调字号的转写文字层
 //   6. 渲染可拖拽、可缩放的遮挡层（颜色/透明度来自设置页）
+//   7. 选句循环播放：勾选一句/多句后，循环播放选中句
 
 (() => {
   "use strict";
 
   const seek = self.b2textSeek;
+  const loop = self.b2textLoop;
   const POLL_MS = 2000;
   const WATCH_MS = 1000;
 
@@ -21,6 +23,8 @@
     segments: [],
     duration: 0,
     taskStatus: "idle", // idle | pending | done | failed
+    selected: [], // 循环选集（升序下标）
+    loopActive: false,
     panel: null,
     overlay: null,
     launchers: null,
@@ -190,6 +194,10 @@
     state.taskStatus = "pending";
     state.segments = [];
     state.duration = 0;
+    state.selected = [];
+    state.loopActive = false;
+    updateLoopButton();
+    syncSelectionUI();
     setStatus("提交解析…");
     chrome.runtime.sendMessage(
       { type: "TRANSCRIBE_BVID", bvid: state.bvid, force },
@@ -237,6 +245,64 @@
     }
   }
 
+  // ---------- 选句循环 ----------
+  function toggleSelect(index) {
+    const pos = state.selected.indexOf(index);
+    if (pos >= 0) {
+      state.selected.splice(pos, 1);
+      if (state.loopActive && !state.selected.length) {
+        // 取消最后一勾时顺手关掉循环，避免“循环 0 句”的悬浮态
+        state.loopActive = false;
+        updateLoopButton();
+      }
+    } else {
+      state.selected.push(index);
+      state.selected.sort((a, b) => a - b);
+    }
+    syncSelectionUI();
+  }
+
+  function toggleLoop(force) {
+    const next = force !== undefined ? force : !state.loopActive;
+    if (next && !state.selected.length && state.segments.length) {
+      // 没选句时默认循环当前播放句
+      let idx = state.video
+        ? seek.currentIndex(state.segments, state.video.currentTime)
+        : -1;
+      if (idx < 0) idx = 0;
+      state.selected = [idx];
+    }
+    state.loopActive = next;
+    updateLoopButton();
+    syncSelectionUI();
+  }
+
+  function updateLoopButton() {
+    const panel = state.panel;
+    const btn = panel && panel.querySelector('button[data-act="loop"]');
+    if (btn) btn.classList.toggle("on", state.loopActive);
+  }
+
+  function updateLoopStatus() {
+    if (state.loopActive) {
+      setStatus(`循环中（${state.selected.length} 句）`);
+    } else if (state.taskStatus === "done") {
+      setStatus(`完成（${state.segments.length} 句）`);
+    }
+  }
+
+  function syncSelectionUI() {
+    if (!state.panel) return;
+    const lines = state.panel.querySelectorAll(".b2text-line");
+    lines.forEach((line, i) => {
+      const check = line.querySelector(".b2text-check");
+      const selected = state.selected.includes(i);
+      if (check) check.checked = selected;
+      line.classList.toggle("selected", selected);
+    });
+    updateLoopStatus();
+  }
+
   // ---------- 转写文字层 ----------
   function ensurePanel() {
     if (state.panel) return state.panel;
@@ -249,6 +315,7 @@
         <button type="button" data-act="start" title="提交当前视频解析">开始解析</button>
         <button type="button" data-act="font-down" title="减小字号">A−</button>
         <button type="button" data-act="font-up" title="增大字号">A+</button>
+        <button type="button" data-act="loop" title="循环播放选中句（Ctrl/^+Shift+L）">循环</button>
         <button type="button" data-act="close" title="隐藏（Ctrl/^+Shift+T 可再打开）">×</button>
       </div>
       <div class="b2text-lines"></div>
@@ -267,10 +334,16 @@
       if (act === "start") startTranscription();
       else if (act === "font-down") adjustFontSize(-2);
       else if (act === "font-up") adjustFontSize(2);
+      else if (act === "loop") toggleLoop();
       else if (act === "close") toggleTranscript(false);
       else if (act === "copy-error") copyError();
     });
     panel.querySelector(".b2text-lines").addEventListener("click", (e) => {
+      const check = e.target.closest(".b2text-check");
+      if (check) {
+        toggleSelect(Number(check.dataset.index));
+        return;
+      }
       const line = e.target.closest(".b2text-line");
       if (line && line.dataset.index != null) seekTo(Number(line.dataset.index));
     });
@@ -371,6 +444,10 @@
     const lines = panel.querySelector(".b2text-lines");
     lines.textContent = "";
     state.segments.forEach((seg, i) => {
+      const check = document.createElement("input");
+      check.type = "checkbox";
+      check.className = "b2text-check";
+      check.dataset.index = String(i);
       const row = document.createElement("div");
       row.className = "b2text-line";
       row.dataset.index = String(i);
@@ -383,9 +460,10 @@
       const text = document.createElement("span");
       text.className = "b2text-text";
       text.textContent = seg.text;
-      row.append(time, spk, text);
+      row.append(check, time, spk, text);
       lines.appendChild(row);
     });
+    syncSelectionUI();
     applySettings();
   }
 
@@ -554,6 +632,10 @@
       state.taskStatus = "idle";
       state.segments = [];
       state.duration = 0;
+      state.selected = [];
+      state.loopActive = false;
+      updateLoopButton();
+      syncSelectionUI();
       clearError();
       ensurePanel();
       setStatus("识别到 " + bvid + "，点击「开始解析」");
@@ -565,6 +647,23 @@
           if (!state.segments.length) return;
           const idx = seek.currentIndex(state.segments, state.video.currentTime);
           highlight(idx);
+          if (state.loopActive) {
+            const next = loop.loopTarget(
+              state.segments,
+              state.selected,
+              state.video.currentTime
+            );
+            if (next >= 0) {
+              state.video.currentTime = state.segments[next].start;
+              highlight(next);
+            }
+          }
+        });
+        state.video.addEventListener("ended", () => {
+          if (!state.loopActive || !state.selected.length) return;
+          const first = state.selected[0];
+          state.video.currentTime = state.segments[first].start;
+          state.video.play().catch(() => {});
         });
         // 视频就绪后，如果设置里默认开遮挡层，则补建遮挡层
         if (state.settings.overlayEnabled) {
@@ -581,6 +680,23 @@
     setStatus("等待视频…");
     watch();
     setInterval(watch, WATCH_MS);
+    // 循环快捷键由扩展内监听实现：Chrome 限制单个扩展最多 4 个
+    // chrome.commands 默认快捷键，选句循环不占用该配额。
+    document.addEventListener("keydown", (e) => {
+      if (!e.ctrlKey || !e.shiftKey || e.altKey || e.metaKey) return;
+      if (e.key.toLowerCase() !== "l") return;
+      const t = e.target;
+      if (
+        t &&
+        (t.tagName === "INPUT" ||
+          t.tagName === "TEXTAREA" ||
+          t.isContentEditable)
+      ) {
+        return;
+      }
+      e.preventDefault();
+      toggleLoop();
+    });
   }
 
   init();

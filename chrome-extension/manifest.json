@@ -23,7 +23,7 @@
         "https://www.bilibili.com/video/*",
         "https://www.bilibili.com/list/*"
       ],
-      "js": ["lib/seek.js", "lib/bvid.js", "content.js"],
+      "js": ["lib/seek.js", "lib/bvid.js", "lib/loop.js", "content.js"],
       "css": ["content.css"],
       "run_at": "document_idle"
     }

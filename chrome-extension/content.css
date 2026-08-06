@@ -74,6 +74,19 @@
   white-space: nowrap;
 }
 
+/* 「循环」按钮需要容纳文字，沿用自动宽度；激活时高亮 */
+.b2text-panel-header button[data-act="loop"] {
+  width: auto;
+  padding: 0 8px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.b2text-panel-header button[data-act="loop"].on {
+  background: rgba(112, 190, 255, 0.4);
+  color: #fff;
+}
+
 /* 悬浮入口：对应层隐藏时出现，点击重新打开 */
 .b2text-launchers {
   position: fixed;
@@ -157,6 +170,15 @@
   cursor: pointer;
 }
 
+.b2text-check {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  margin: 3px 0 0;
+  accent-color: #70beff;
+  cursor: pointer;
+}
+
 .b2text-line:hover {
   background: rgba(255, 255, 255, 0.08);
 }
@@ -164,6 +186,12 @@
 .b2text-line.active {
   background: rgba(230, 162, 60, 0.22);
   border-left: 3px solid #f0a24b;
+  padding-left: 9px;
+}
+
+.b2text-line.selected {
+  background: rgba(112, 190, 255, 0.16);
+  border-left: 3px solid #70beff;
   padding-left: 9px;
 }
 

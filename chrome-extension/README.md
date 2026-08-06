@@ -13,6 +13,7 @@ chrome-extension/
 ├── content.js        # 注入播放页：读 BV 号、控制 <video> 跳句、渲染文字/遮挡层
 ├── content.css       # 文字层 / 遮挡层样式
 ├── lib/seek.js       # 上一句/下一句的二分查找（纯逻辑，可单测）
+├── lib/loop.js       # 选句循环的跳转目标计算（纯逻辑，可单测）
 ├── popup/            # 工具栏弹窗：状态、提交/重试
 ├── options/          # 设置页：后端地址、显示开关、样式
 ├── tests/            # Node 单测（node --test tests/seek.test.js）
@@ -32,20 +33,25 @@ chrome-extension/
 2. 开启「开发者模式」
 3. 「加载已解压的扩展程序」→ 选择本目录
 4. 快捷键默认：`Ctrl+Shift+→` 下一句、`Ctrl+Shift+←` 上一句、
-   `Ctrl+Shift+T` 文字层、`Ctrl+Shift+O` 遮挡层（macOS 用 Control 键，即
-   `^+Shift`；可在 chrome://extensions/shortcuts 修改）
+   `Ctrl+Shift+T` 文字层、`Ctrl+Shift+O` 遮挡层、`Ctrl+Shift+L` 循环播放
+   选中句（macOS 用 Control 键，即 `^+Shift`；可在
+   chrome://extensions/shortcuts 修改）。注：Chrome 限制单个扩展最多 4 个
+   `chrome.commands` 默认快捷键，前四个走系统快捷键，循环快捷键由扩展内
+   按键监听实现（在播放页内按 `Ctrl/^+Shift+L` 即可）。
 
 ## 当前状态
 
 已实现：打开播放页后手动点击「开始解析」提交转写、轮询时间线、快捷键跳句、
 可拖拽/调字号的文字层、可拖拽/缩放的遮挡层（颜色/透明度可配）、设置页与弹窗。
 遮挡层默认是视频底部的一条字幕遮挡条（高度约 1/4），可拖拽移动、右下角
-拖拽调整大小（底边固定）。
+拖拽调整大小（底边固定）。转写完成后勾选一句或多句并点「循环」（或按
+`Ctrl/^+Shift+L`），播放到句尾自动跳到下一选中句，最后一句结束回到第一句；
+未选句时开启循环默认选中当前播放句。
 
 ## 测试
 
 ```bash
-node --test tests/*.test.js      # 跳句纯逻辑 + BV 号解析
+node --test tests/*.test.js      # 跳句/循环纯逻辑 + BV 号解析
 node chrome-extension/e2e/extension-e2e.test.js   # Playwright 端到端（需 GUI）
 ```
 
